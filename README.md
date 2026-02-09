@@ -1,0 +1,109 @@
+# NVEnc Video Converter
+
+基于 NVEncC 的高性能视频转码工具，专为 NVIDIA 显卡优化。支持将视频转换为 AV1/HEVC 编码 + MKV 容器，同时完整保留原始音轨、字幕和章节信息。
+
+## 功能特性
+
+- **硬件加速**：完全基于 NVEncC，利用 NVIDIA 显卡进行高速转码
+- **多格式支持**：支持蓝光文件夹 (BDMV)、MKV、MP4、TS、M2TS 等多种格式
+- **智能蓝光处理**：
+  - 自动识别蓝光目录结构
+  - 自动提取章节信息 (MPLS)
+  - 自动识别音轨和字幕语言
+  - 筛选主电影文件 (>=500MB)
+- **无损保留**：
+  - 完整复制所有音轨 (Audio Copy)
+  - 完整复制所有字幕 (Subtitle Copy)
+  - 完整复制章节信息 (Chapter Copy)
+  - 保留 HDR/Dolby Vision 元数据
+- **NFO 生成**：
+  - 转码完成后为输出视频生成同名 `.nfo`
+  - 内容基于输出文件的真实流信息自动生成
+- **质量控制**：
+  - 支持 AV1 (默认) 和 HEVC 编码
+  - 使用 QVBR 码率控制模式
+  - **内置质量评估**：支持 VMAF、SSIM、PSNR 质量评估 (由 NVEncC 直接计算)
+- **易用性**：
+  - 自动跳过已处理文件
+  - 简洁的命令行接口
+
+## 环境要求
+
+- **硬件**：NVIDIA 显卡 (支持 NVENC)
+- **软件**：
+  - Python 3.7+
+  - [NVEncC](https://github.com/rigaya/NVEnc) (必须添加到系统 PATH 或指定路径)
+  - FFmpeg 的 `ffprobe` (用于生成 NFO 所需的媒体信息)
+  - 显卡驱动需更新到最新版本
+
+## 安装
+
+1. 下载并解压 [NVEncC](https://github.com/rigaya/NVEnc/releases)，将 `NVEncC64.exe` 所在目录添加到系统 PATH 环境变量。
+   - 或者在运行时通过 `--nvenc-path` 指定路径。
+
+2. 克隆本项目：
+   ```bash
+   git clone <repository_url>
+   cd ffmpeg_video_convert
+   ```
+
+3. 安装开发依赖 (可选，仅用于代码格式化)：
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## 使用方法
+
+### 基本用法
+
+```bash
+python video_converter.py <输入文件或目录>
+```
+
+### 常用参数
+
+- `-o, --output`: 指定输出文件或目录
+- `--encoder`: 视频编码器 (默认 `av1_nvenc`，可选 `hevc_nvenc`)
+- `--enable-quality-eval`: 启用转换后的质量评估 (VMAF/SSIM/PSNR)
+- `--nvenc-path`: 指定 NVEncC64.exe 的路径 (如果未在 PATH 中)
+
+### 使用示例
+
+1. **转换单个视频文件 (AV1)**：
+   ```bash
+   python video_converter.py movie.mkv
+   ```
+
+2. **使用 HEVC 编码**：
+   ```bash
+   python video_converter.py movie.mkv --encoder hevc_nvenc
+   ```
+
+3. **转换蓝光目录**：
+   自动扫描 BDMV/STREAM 下的大于 500MB 的 M2TS 文件并转换。
+   ```bash
+   python video_converter.py "D:\Movies\Avatar BluRay"
+   ```
+
+4. **启用质量评估**：
+   转码完成后输出 VMAF, SSIM, PSNR 分数。
+   ```bash
+   python video_converter.py movie.mkv --enable-quality-eval
+   ```
+
+5. **指定输出目录**：
+   ```bash
+   python video_converter.py movie.mkv -o "E:\Converted"
+   ```
+
+## 质量评估说明
+
+开启 `--enable-quality-eval` 后，NVEncC 会在转码过程中计算视频质量指标：
+
+- **VMAF**: Netflix 开发的感知视频质量指标 (0-100)，推荐 93+ 为高质量。
+- **SSIM**: 结构相似性 (0-1)，越高越好。
+- **PSNR**: 峰值信噪比 (dB)，越高越好。
+
+## 许可证
+
+本项目仅供个人学习和使用。

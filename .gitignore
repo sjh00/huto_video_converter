@@ -1,0 +1,11 @@
+__pycache__/
+.ruff_cache/
+output/
+temp/
+test/
+reference/
+vmaf_models/
+ffmpeg/
+*.log
+*.cutree
+*.json

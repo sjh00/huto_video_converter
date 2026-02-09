@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import argparse
+from pathlib import Path
+from video_converter.converter import VideoConverter
+from video_converter.constants import Constants
+from video_converter.utils import Utils
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="将视频转换为 AV1/HEVC + MKV 容器，并复制音轨/字幕 (使用 NVEncC)"
+    )
+    parser.add_argument(
+        "input",
+        nargs="*",
+        help="输入视频文件/目录",
+    )
+    parser.add_argument("-o", "--output", help="输出文件或目录")
+    parser.add_argument(
+        "--encoder",
+        default=Constants.DEFAULT_ENCODER,
+        choices=list(Constants.ENCODER_NAMES.keys()),
+        help=f"视频编码器(默认: {Constants.DEFAULT_ENCODER}，可选: {', '.join(Constants.ENCODER_NAMES.keys())})",
+    )
+    parser.add_argument(
+        "--enable-quality-eval",
+        action="store_true",
+        default=False,
+        help="转换时启用 VMAF/SSIM/PSNR 质量评估 (NVEncC 内置)",
+    )
+    parser.add_argument(
+        "--nvenc-path",
+        default=None,
+        help="NVEncC64 可执行文件路径(默认: 自动检测)",
+    )
+
+    args = parser.parse_args()
+
+    # Auto-detect tools if not provided
+    args.nvenc_path = args.nvenc_path or Utils.find_tool("NVEncC64")
+
+    if not args.input:
+        print("错误: 未指定输入")
+        parser.print_help()
+        sys.exit(1)
+
+    if len(args.input) > 1 and args.output:
+        output_path = Path(args.output)
+        if output_path.suffix:
+            print("错误: 多输入时输出必须为目录")
+            sys.exit(1)
+
+    converter = VideoConverter(
+        args.nvenc_path,
+        args.enable_quality_eval,
+    )
+
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    RESET = "\033[0m"
+
+    total = len(args.input)
+    success_count = 0
+    fail_count = 0
+    for idx, input_path in enumerate(args.input, 1):
+        if not Path(input_path).exists():
+            print(f"错误: 未找到输入: {input_path}")
+            fail_count += 1
+            continue
+
+        print(f"\n{'=' * 70}")
+        print(f"[{idx}/{total}] 正在转换: {Path(input_path).name}")
+        print(f"{'=' * 70}")
+
+        success = converter.convert(
+            input_path,
+            args.output,
+            args.encoder,
+        )
+
+        if success:
+            print(f"\n{GREEN}转换完成!{RESET}")
+            success_count += 1
+        else:
+            print(f"\n{RED}转换失败!{RESET}")
+            fail_count += 1
+
+    if total > 0:
+        if fail_count == 0:
+            print(f"\n{GREEN}汇总: {success_count}/{total} 成功{RESET}")
+        else:
+            print(f"\n汇总: {success_count}/{total} 成功, {YELLOW}{fail_count} 失败{RESET}")
+
+    if fail_count > 0:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

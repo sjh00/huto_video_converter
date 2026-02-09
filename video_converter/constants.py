@@ -1,0 +1,25 @@
+class Constants:
+    VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".mpeg", ".mpg"]
+    ISO_EXTENSION = ".iso"
+    MIN_BLURAY_FILE_SIZE_MB = 500
+    DEFAULT_MAX_BITRATE = 20000000
+    DEFAULT_BITRATE = 5000000
+    NVENC_MAX_BITRATE = 40000000
+
+    BLURAY_REQUIRED_PATHS = ["BDMV", "BDMV/STREAM"]
+    BLURAY_PATHS = {"STREAM": "BDMV/STREAM", "PLAYLIST": "PLAYLIST", "CLIPINF": "CLIPINF"}
+
+    MARK_TYPE_CHAPTER = 0x01
+
+    PES_STREAM_IDS = [0xBD, 0xBF, 0xFD, 0xFE]
+    TS_SYNC_BYTE = 0x47
+
+    STREAM_TYPE_AUDIO = 0x11
+    STREAM_TYPE_SUBTITLE = 0x12
+
+    DEFAULT_ENCODER = "av1_nvenc"
+
+    ENCODER_NAMES = {
+        "av1_nvenc": "NVIDIA NVENC AV1 (NVEncC)",
+        "hevc_nvenc": "NVIDIA NVENC HEVC (NVEncC)",
+    }
