@@ -134,7 +134,6 @@ class NVEncTranscoder:
         output_csp: Optional[str] = None,
         is_4k: bool = False,
         vmaf_subsample: int = 1,
-        fps: Optional[float] = None,
     ) -> List[str]:
         format = "av1"
         if "hevc" in encoder.lower():
@@ -145,12 +144,6 @@ class NVEncTranscoder:
         # Basic codec settings
         nvenc_opts_dict = {"codec": format}
         nvenc_opts_dict.update(params)
-
-        if "gop-len" not in nvenc_opts_dict:
-            if fps and fps > 0:
-                nvenc_opts_dict["gop-len"] = int(math.ceil(fps * 4))
-            else:
-                nvenc_opts_dict["gop-len"] = 96
 
         # HDR / Color handling - Always use auto/copy for maximum preservation
         nvenc_opts_dict.update({
@@ -239,6 +232,7 @@ class NVEncTranscoder:
         audio_langs: Dict[int, str] = None,
         subtitle_langs: Dict[int, str] = None,
         source_video_info: Optional[Dict[str, object]] = None,
+        qvbr: Optional[int] = None,
     ) -> Dict[str, any]:
 
         handle_choice = self._handle_existing_output(output_file)
@@ -248,6 +242,14 @@ class NVEncTranscoder:
             return {"success": False, "skipped": True}
 
         params = QualityPreset.get_params(encoder)
+        if qvbr is not None:
+            params["qvbr"] = qvbr
+        if "gop-len" not in params:
+            fps = source_video_info.get("fps")
+            if fps and fps > 0:
+                params["gop-len"] = int(math.ceil(fps * 4))
+            else:
+                params["gop-len"] = 96
 
         source_video_info = source_video_info or {}
         nvenc_opts = self._get_nvenc_options(
@@ -260,7 +262,6 @@ class NVEncTranscoder:
             output_csp=source_video_info.get("output_csp"),
             is_4k=bool(source_video_info.get("is_4k")),
             vmaf_subsample=source_video_info.get("vmaf_subsample", 1),
-            fps=source_video_info.get("fps"),
         )
 
         cmd, cmd_print = self._build_nvenc_cmd(input_file, output_file, nvenc_opts)

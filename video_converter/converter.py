@@ -74,6 +74,7 @@ class VideoConverter:
         input_file: str,
         output_file: str = None,
         encoder: str = "av1_nvenc",
+        qvbr: Optional[int] = None,
     ) -> bool:
         input_path = Path(input_file)
 
@@ -114,6 +115,7 @@ class VideoConverter:
             audio_langs,
             subtitle_langs,
             source_video_info,
+            qvbr,
         )
 
         success = result.get("success", False)
@@ -133,7 +135,13 @@ class VideoConverter:
 
         return success
 
-    def _process_bluray_directory(self, directory: str, output_dir: str, encoder: str) -> bool:
+    def _process_bluray_directory(
+        self,
+        directory: str,
+        output_dir: str,
+        encoder: str,
+        qvbr: Optional[int],
+    ) -> bool:
         print("开始处理蓝光目录...")
         dir_path = Path(directory)
         bluray_root = dir_path.parent if dir_path.name.upper() == "BDMV" else dir_path
@@ -215,7 +223,7 @@ class VideoConverter:
                             f"[{idx}/{len(single_clip_candidates)}] 正在转换 {m2ts_name}"
                         )
 
-                        if self.convert_file(m2ts_file, output_file, encoder):
+                        if self.convert_file(m2ts_file, output_file, encoder, qvbr):
                             success_count += 1
 
                     print(
@@ -247,13 +255,19 @@ class VideoConverter:
 
             print(f"[{idx}/{len(large_m2ts_files)}] 正在转换 {m2ts_name}")
 
-            if self.convert_file(m2ts_file, output_file, encoder):
+            if self.convert_file(m2ts_file, output_file, encoder, qvbr):
                 success_count += 1
 
         print(f"\n完成: 成功 {success_count}/{len(large_m2ts_files)} 个文件")
         return success_count == len(large_m2ts_files)
 
-    def _process_single_video_directory(self, directory: str, output_dir: str, encoder: str) -> bool:
+    def _process_single_video_directory(
+        self,
+        directory: str,
+        output_dir: str,
+        encoder: str,
+        qvbr: Optional[int],
+    ) -> bool:
         print("开始处理单视频目录...")
         dir_path = Path(directory)
         video_files = Utils.get_video_files(dir_path)
@@ -269,12 +283,18 @@ class VideoConverter:
 
             output_file = str(output_path / f"{input_name}.mkv")
 
-            return self.convert_file(input_file, output_file, encoder)
+            return self.convert_file(input_file, output_file, encoder, qvbr)
         else:
             print("错误: 目录中未找到视频文件")
             return False
 
-    def _process_tv_series_directory(self, directory: str, output_dir: str, encoder: str) -> bool:
+    def _process_tv_series_directory(
+        self,
+        directory: str,
+        output_dir: str,
+        encoder: str,
+        qvbr: Optional[int],
+    ) -> bool:
         print("开始处理电视剧目录...")
         dir_path = Path(directory)
         video_files = Utils.get_video_files(dir_path)
@@ -291,7 +311,7 @@ class VideoConverter:
         for idx, video_file in enumerate(sorted(video_files), 1):
             output_file = str(output_path / f"{dir_path.name}_{video_file.stem}.mkv")
             print(f"[{idx}/{len(video_files)}] 正在转换 {video_file.name}")
-            if self.convert_file(str(video_file), output_file, encoder):
+            if self.convert_file(str(video_file), output_file, encoder, qvbr):
                 success_count += 1
 
         print(f"\n完成: 成功 {success_count}/{len(video_files)} 个文件")
@@ -318,7 +338,13 @@ class VideoConverter:
 
         return str(output_path / f"{input_path.stem}.mkv")
 
-    def convert_directory(self, directory: str, output_dir: str = None, encoder: str = "av1_nvenc") -> bool:
+    def convert_directory(
+        self,
+        directory: str,
+        output_dir: str = None,
+        encoder: str = "av1_nvenc",
+        qvbr: Optional[int] = None,
+    ) -> bool:
         dir_path = Path(directory)
 
         if not dir_path.exists() or not dir_path.is_dir():
@@ -333,13 +359,19 @@ class VideoConverter:
         print(f"检测到结构类型: {structure}")
 
         if structure == "bluray":
-            return self._process_bluray_directory(directory, output_dir, encoder)
+            return self._process_bluray_directory(directory, output_dir, encoder, qvbr)
         elif structure == "tv_series":
-            return self._process_tv_series_directory(directory, output_dir, encoder)
+            return self._process_tv_series_directory(directory, output_dir, encoder, qvbr)
         else:
-            return self._process_single_video_directory(directory, output_dir, encoder)
+            return self._process_single_video_directory(directory, output_dir, encoder, qvbr)
 
-    def convert(self, input_path: str, output_path: str = None, encoder: str = "av1_nvenc") -> bool:
+    def convert(
+        self,
+        input_path: str,
+        output_path: str = None,
+        encoder: str = "av1_nvenc",
+        qvbr: Optional[int] = None,
+    ) -> bool:
         path = Path(input_path)
 
         if not path.exists():
@@ -359,10 +391,10 @@ class VideoConverter:
                 if output_path and Path(output_path).suffix:
                     output_dir = str(Path(output_path).parent)
                 output_file = self._resolve_bluray_output_file(path, output_dir, encoder)
-                return self.convert_file(input_path, output_file, encoder)
-            return self.convert_file(input_path, output_path, encoder)
+                return self.convert_file(input_path, output_file, encoder, qvbr)
+            return self.convert_file(input_path, output_path, encoder, qvbr)
         elif path.is_dir():
-            return self.convert_directory(input_path, output_path, encoder)
+            return self.convert_directory(input_path, output_path, encoder, qvbr)
         else:
             print(f"错误: 路径不存在: {input_path}")
             return False

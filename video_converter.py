@@ -71,11 +71,15 @@ def main():
         default=None,
         help="NVEncC64 可执行文件路径(默认: 自动检测)",
     )
+    parser.add_argument("--qvbr", type=int, help="指定 QVBR 值 (不指定则自动)")
 
     args = parser.parse_args()
 
     # Auto-detect tools if not provided
     args.nvenc_path = args.nvenc_path or Utils.find_tool("NVEncC64")
+    if args.qvbr is not None and args.qvbr <= 0:
+        print("错误: qvbr 必须为正整数")
+        sys.exit(1)
 
     if not args.input or args.input == ["input"]:
         input_dir = Path(__file__).parent / "input"
@@ -127,6 +131,7 @@ def main():
             input_path,
             args.output,
             args.encoder,
+            args.qvbr,
         )
 
         if success:
