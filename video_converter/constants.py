@@ -1,7 +1,7 @@
 class Constants:
     VIDEO_EXTENSIONS = [".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".mpeg", ".mpg"]
     ISO_EXTENSION = ".iso"
-    MIN_BLURAY_FILE_SIZE_MB = 500
+    MIN_BLURAY_FILE_SIZE_MB = 100
     DEFAULT_MAX_BITRATE = 20000000
     DEFAULT_BITRATE = 5000000
     NVENC_MAX_BITRATE = 40000000

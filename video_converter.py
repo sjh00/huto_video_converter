@@ -3,10 +3,45 @@
 
 import sys
 import argparse
+import os
 from pathlib import Path
+from typing import List
 from video_converter.converter import VideoConverter
+from video_converter.bluray import BluRayDetector
 from video_converter.constants import Constants
 from video_converter.utils import Utils
+
+
+def _collect_batch_inputs(input_dir: Path) -> List[str]:
+    detector = BluRayDetector()
+    inputs = []
+    seen = set()
+
+    def add_path(path: Path) -> None:
+        path_str = str(path)
+        if path_str not in seen:
+            seen.add(path_str)
+            inputs.append(path_str)
+
+    for root, dirs, files in os.walk(input_dir):
+        root_path = Path(root)
+        if detector.is_bluray_directory(str(root_path)):
+            add_path(root_path)
+            dirs[:] = []
+            continue
+        if root_path.name == "BDMV" and root_path.parent.exists():
+            if detector.is_bluray_directory(str(root_path.parent)):
+                add_path(root_path.parent)
+                dirs[:] = []
+                continue
+        if detector.is_tv_series(str(root_path)):
+            add_path(root_path)
+            dirs[:] = []
+            continue
+        for file in files:
+            if Path(file).suffix.lower() in Constants.VIDEO_EXTENSIONS:
+                add_path(root_path / file)
+    return inputs
 
 
 def main():
@@ -42,10 +77,22 @@ def main():
     # Auto-detect tools if not provided
     args.nvenc_path = args.nvenc_path or Utils.find_tool("NVEncC64")
 
-    if not args.input:
-        print("错误: 未指定输入")
-        parser.print_help()
-        sys.exit(1)
+    if not args.input or args.input == ["input"]:
+        input_dir = Path(__file__).parent / "input"
+        batch_inputs = _collect_batch_inputs(input_dir) if input_dir.exists() else []
+        if batch_inputs:
+            if args.input != ["input"]:
+                choice = input("检测到 input 目录存在视频，是否批量转码? (Y/n): ").strip().lower()
+                if choice in ("n", "no", "否", "不", "0"):
+                    sys.exit(0)
+                else:
+                    args.input = batch_inputs
+            else:
+                args.input = batch_inputs
+        else:
+            print("错误: 未指定输入")
+            parser.print_help()
+            sys.exit(1)
 
     if len(args.input) > 1 and args.output:
         output_path = Path(args.output)

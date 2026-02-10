@@ -96,6 +96,38 @@ class BluRayDetector:
         return stream_info
 
     @staticmethod
+    def parse_mpls_info(mpls_path: Path) -> Optional[Dict]:
+        mpls = BluRayDetector._parse_mpls(mpls_path)
+        if not mpls or not hasattr(mpls, "PlayList") or not mpls.PlayList:
+            return None
+        play_items = mpls.PlayList.get("PlayItems", [])
+        clip_names = []
+        duration_seconds = 0.0
+        for play_item in play_items:
+            clip_name = play_item.get("ClipInformationFileName")
+            if clip_name:
+                if not clip_name.endswith(".m2ts"):
+                    clip_name += ".m2ts"
+                clip_names.append(clip_name)
+            in_time = play_item.get("INTime", 0)
+            out_time = play_item.get("OUTTime", 0)
+            if out_time > in_time:
+                duration_seconds += (out_time - in_time) / 45000.0
+        chapter_count = 0
+        play_list_marks = {}
+        if hasattr(mpls, "PlayListMarks") and mpls.PlayListMarks:
+            play_list_marks = mpls.PlayListMarks.get("PlayListMarks", [])
+        for mark in play_list_marks:
+            if mark.get("MarkType", 0) == Constants.MARK_TYPE_CHAPTER:
+                chapter_count += 1
+        return {
+            "duration": duration_seconds,
+            "clip_names": clip_names,
+            "chapter_count": chapter_count,
+            "play_item_count": len(play_items),
+        }
+
+    @staticmethod
     def parse_mpls_audio_languages(mpls_path: Path) -> Dict[int, str]:
         return BluRayDetector.parse_mpls_stream_info(mpls_path).get("audio_languages", {})
 

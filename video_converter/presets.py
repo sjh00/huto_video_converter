@@ -14,6 +14,7 @@ class QualityPreset:
             "bframes": 4, # 默认由preset和tune决定
             # "qvbr": 28, # 默认自动
             # "ref": 4, # 默认由preset和tune决定
+            "parallel": "auto",
         },
         "hevc_nvenc": {
             "preset": "quality",
@@ -23,6 +24,7 @@ class QualityPreset:
             "bframes": 4, # 默认由preset和tune决定
             # "qvbr": 28, # 默认自动
             # "ref": 4, # 默认由preset和tune决定
+            "parallel": "auto",
         },
     }
 

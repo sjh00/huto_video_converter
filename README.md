@@ -10,7 +10,7 @@
   - 自动识别蓝光目录结构
   - 自动提取章节信息 (MPLS)
   - 自动识别音轨和字幕语言
-  - 筛选主电影文件 (>=500MB)
+  - 筛选主电影、彩蛋、花絮、采访、记录等文件 (智能筛选或>=指定大小的文件)
 - **无损保留**：
   - 完整复制所有音轨 (Audio Copy)
   - 完整复制所有字幕 (Subtitle Copy)
@@ -60,6 +60,8 @@
 python video_converter.py <输入文件或目录>
 ```
 
+未提供参数时，程序会检测项目根目录下的 `input` 目录是否包含视频或蓝光目录，并询问是否批量转码。
+
 ### 常用参数
 
 - `-o, --output`: 指定输出文件或目录
@@ -80,9 +82,13 @@ python video_converter.py <输入文件或目录>
    ```
 
 3. **转换蓝光目录**：
-   自动扫描 BDMV/STREAM 下的大于 500MB 的 M2TS 文件并转换。
+   支持传入蓝光根目录或 BDMV 目录，自动扫描 BDMV/STREAM 下的 M2TS 文件，智能筛选并转换。
    ```bash
    python video_converter.py "D:\Movies\Avatar BluRay"
+   ```
+   或
+   ```bash
+   python video_converter.py "D:\Movies\Avatar BluRay\BDMV"
    ```
 
 4. **启用质量评估**：
@@ -94,6 +100,11 @@ python video_converter.py <输入文件或目录>
 5. **指定输出目录**：
    ```bash
    python video_converter.py movie.mkv -o "E:\Converted"
+   ```
+
+6. **无参数批量处理 input**：
+   ```bash
+   python video_converter.py
    ```
 
 ## 质量评估说明

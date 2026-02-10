@@ -7,6 +7,7 @@ from .utils import Utils
 from .bluray import BluRayDetector
 from .transcoder import NVEncTranscoder
 from .mediainfo import MediaInfo
+from .constants import Constants
 
 
 class VideoConverter:
@@ -134,25 +135,115 @@ class VideoConverter:
 
     def _process_bluray_directory(self, directory: str, output_dir: str, encoder: str) -> bool:
         print("开始处理蓝光目录...")
+        dir_path = Path(directory)
+        bluray_root = dir_path.parent if dir_path.name.upper() == "BDMV" else dir_path
+        bdmv_dir = (
+            bluray_root / "BDMV" if (bluray_root / "BDMV").exists() else dir_path
+        )
+        playlist_dir = bdmv_dir / Constants.BLURAY_PATHS["PLAYLIST"]
+        stream_dir = bdmv_dir / Constants.BLURAY_PATHS["STREAM"]
+
+        playlist_infos = []
+        if playlist_dir.exists() and stream_dir.exists():
+            m2ts_size_map = {
+                f.name: f.stat().st_size for f in stream_dir.glob("*.m2ts")
+            }
+            for mpls_file in playlist_dir.glob("*.mpls"):
+                info = self.detector.parse_mpls_info(mpls_file)
+                if not info:
+                    continue
+                clip_names = info.get("clip_names", [])
+                size_bytes = sum(m2ts_size_map.get(name, 0) for name in clip_names)
+                info["mpls_name"] = mpls_file.stem
+                info["size_mb"] = size_bytes / (1024 * 1024)
+                playlist_infos.append(info)
+
+        if playlist_infos:
+            deduped = {}
+            for info in playlist_infos:
+                key = tuple(info.get("clip_names", []))
+                if not key:
+                    continue
+                existing = deduped.get(key)
+                if not existing or info["duration"] > existing["duration"]:
+                    deduped[key] = info
+            playlist_infos = list(deduped.values())
+
+            max_duration = max(info["duration"] for info in playlist_infos)
+            min_duration = 15.0
+            min_size_mb = 40.0
+            long_duration = 600.0
+
+            candidates = []
+            for info in playlist_infos:
+                duration = info["duration"]
+                size_mb = info["size_mb"]
+                chapter_count = info["chapter_count"]
+                relative_ok = max_duration > 0 and duration >= max_duration * 0.15
+                if duration < min_duration:
+                    continue
+                if not (
+                    size_mb >= min_size_mb
+                    or chapter_count > 0
+                    or duration >= long_duration
+                    or relative_ok
+                ):
+                    continue
+                candidates.append(info)
+
+            if candidates:
+                candidates.sort(key=lambda x: x["duration"], reverse=True)
+                single_clip_candidates = [
+                    info
+                    for info in candidates
+                    if len(info["clip_names"]) == 1
+                    and (stream_dir / info["clip_names"][0]).exists()
+                ]
+                if single_clip_candidates:
+                    input_name = bluray_root.name or datetime.now().strftime("%Y%m%d_%H%M%S")
+                    output_path = Utils.get_output_dir(output_dir) / input_name
+                    output_path.mkdir(parents=True, exist_ok=True)
+
+                    success_count = 0
+                    for idx, info in enumerate(single_clip_candidates, 1):
+                        m2ts_name = info["clip_names"][0]
+                        m2ts_file = str(stream_dir / m2ts_name)
+                        m2ts_stem = Path(m2ts_name).stem
+                        output_file = str(output_path / f"{m2ts_stem}.mkv")
+
+                        print(
+                            f"[{idx}/{len(single_clip_candidates)}] 正在转换 {m2ts_name}"
+                        )
+
+                        if self.convert_file(m2ts_file, output_file, encoder):
+                            success_count += 1
+
+                    print(
+                        f"\n完成: 成功 {success_count}/{len(single_clip_candidates)} 个文件"
+                    )
+                    return success_count == len(single_clip_candidates)
+                print("警告: 未找到可直接处理的单片段播放列表，回退到按文件大小筛选")
+            else:
+                print("警告: 未找到符合条件的播放列表，回退到按文件大小筛选")
+        else:
+            print("警告: 未找到可用播放列表，回退到按文件大小筛选")
+
         large_m2ts_files = self.detector.get_large_m2ts_files(directory)
 
         if not large_m2ts_files:
-            print("错误: 蓝光目录中未找到大于 500MB 的 M2TS 文件")
+            print(f"错误: 蓝光目录中未找到有价值的 M2TS 文件")
             return False
 
-        print(f"发现 {len(large_m2ts_files)} 个 M2TS 文件(>=500MB)，开始转换")
+        print(f"发现 {len(large_m2ts_files)} 个有价值的 M2TS 文件，开始转换")
 
-        dir_path = Path(directory)
-        input_name = dir_path.name or datetime.now().strftime("%Y%m%d_%H%M%S")
+        input_name = bluray_root.name or datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = Utils.get_output_dir(output_dir) / input_name
         output_path.mkdir(parents=True, exist_ok=True)
-
-        ext_suffix = self._get_output_suffix(encoder)
 
         success_count = 0
         for idx, (m2ts_file, m2ts_name) in enumerate(large_m2ts_files, 1):
             m2ts_stem = Path(m2ts_name).stem
-            output_file = str(output_path / f"{input_name}_{m2ts_stem}{ext_suffix}.mkv")
+            output_file = str(output_path / f"{m2ts_stem}.mkv")
 
             print(f"[{idx}/{len(large_m2ts_files)}] 正在转换 {m2ts_name}")
 
@@ -233,16 +324,16 @@ class VideoConverter:
         if not dir_path.exists() or not dir_path.is_dir():
             print(f"错误: 目录不存在: {directory}")
             return False
+        if dir_path.name == "BDMV" and dir_path.parent.exists():
+            if self.detector.is_bluray_directory(str(dir_path.parent)):
+                directory = str(dir_path.parent)
+                dir_path = Path(directory)
 
         structure = self.detector.detect_structure(directory)
         print(f"检测到结构类型: {structure}")
 
         if structure == "bluray":
-            print(
-                "错误: 当前不支持蓝光文件夹批量处理。请进入 STREAM 目录选择具体视频文件并使用绝对路径。"
-            )
-            print("示例: python video_converter.py D:\\BDMV\\STREAM\\00001.m2ts")
-            return False
+            return self._process_bluray_directory(directory, output_dir, encoder)
         elif structure == "tv_series":
             return self._process_tv_series_directory(directory, output_dir, encoder)
         else:
