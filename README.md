@@ -22,6 +22,7 @@
 - **质量控制**：
   - 支持 AV1 (默认) 和 HEVC 编码
   - 使用 QVBR 码率控制模式
+  - 默认 GOP 长度为 4 秒 (gop-len = ceil(fps * 4))
   - **内置质量评估**：支持 VMAF、SSIM、PSNR 质量评估 (由 NVEncC 直接计算)
 - **易用性**：
   - 自动跳过已处理文件
@@ -65,9 +66,9 @@ python video_converter.py <输入文件或目录>
 ### 常用参数
 
 - `-o, --output`: 指定输出文件或目录
-- `--encoder`: 视频编码器 (默认 `av1_nvenc`，可选 `hevc_nvenc`)
-- `--enable-quality-eval`: 启用转换后的质量评估 (VMAF/SSIM/PSNR)
-- `--nvenc-path`: 指定 NVEncC64.exe 的路径 (如果未在 PATH 中)
+- `-e, --encoder`: 视频编码器 (默认 `av1_nvenc`，可选 `hevc_nvenc`)
+- `-v, --enable-quality-eval`: 启用转换后的质量评估 (VMAF/SSIM/PSNR)
+- `-p, --nvenc-path`: 指定 NVEncC64.exe 的路径 (如果未在 PATH 中)
 
 ### 使用示例
 

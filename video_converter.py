@@ -55,19 +55,19 @@ def main():
     )
     parser.add_argument("-o", "--output", help="输出文件或目录")
     parser.add_argument(
-        "--encoder",
+        "-e", "--encoder",
         default=Constants.DEFAULT_ENCODER,
         choices=list(Constants.ENCODER_NAMES.keys()),
         help=f"视频编码器(默认: {Constants.DEFAULT_ENCODER}，可选: {', '.join(Constants.ENCODER_NAMES.keys())})",
     )
     parser.add_argument(
-        "--enable-quality-eval",
+        "-v", "--enable-quality-eval",
         action="store_true",
         default=False,
         help="转换时启用 VMAF/SSIM/PSNR 质量评估 (NVEncC 内置)",
     )
     parser.add_argument(
-        "--nvenc-path",
+        "-p", "--nvenc-path",
         default=None,
         help="NVEncC64 可执行文件路径(默认: 自动检测)",
     )

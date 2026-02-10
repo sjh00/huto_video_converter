@@ -2,6 +2,7 @@ import subprocess
 import re
 import sys
 import time
+import math
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
@@ -75,6 +76,53 @@ class NVEncTranscoder:
                 return choice_res
             print("无效选项，请重新输入")
 
+    def _extract_quality_metrics(self, output: str) -> Dict[str, float]:
+        metrics: Dict[str, float] = {}
+        vmaf_match = re.search(
+            r"\bVMAF\b.*?\bScore\s*([0-9]+(?:\.[0-9]+)?)", output, re.IGNORECASE
+        )
+        if vmaf_match:
+            metrics["vmaf"] = float(vmaf_match.group(1))
+        ssim_match = re.search(
+            r"\bSSIM\b.*?\bAll:\s*([0-9]+(?:\.[0-9]+)?)",
+            output,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if ssim_match:
+            metrics["ssim"] = float(ssim_match.group(1))
+        psnr_match = re.search(
+            r"\bPSNR\b.*?\bAvg:\s*([0-9]+(?:\.[0-9]+)?)",
+            output,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if psnr_match:
+            metrics["psnr"] = float(psnr_match.group(1))
+
+        idr_match = re.search(r"frame type IDR\s+(\d+)", output, re.IGNORECASE)
+        if idr_match:
+            metrics["idr_count"] = float(idr_match.group(1))
+        iframe_match = re.search(
+            r"frame type I\s+(\d+),\s*avgQP\s*([0-9]+(?:\.[0-9]+)?)"
+            r",\s*total size\s*([0-9]+(?:\.[0-9]+)?)\s*MB",
+            output,
+            re.IGNORECASE,
+        )
+        if iframe_match:
+            metrics["i_count"] = float(iframe_match.group(1))
+            metrics["i_avg_qp"] = float(iframe_match.group(2))
+            metrics["i_size_mb"] = float(iframe_match.group(3))
+        pframe_match = re.search(
+            r"frame type P\s+(\d+),\s*avgQP\s*([0-9]+(?:\.[0-9]+)?)"
+            r",\s*total size\s*([0-9]+(?:\.[0-9]+)?)\s*MB",
+            output,
+            re.IGNORECASE,
+        )
+        if pframe_match:
+            metrics["p_count"] = float(pframe_match.group(1))
+            metrics["p_avg_qp"] = float(pframe_match.group(2))
+            metrics["p_size_mb"] = float(pframe_match.group(3))
+        return metrics
+
     def _get_nvenc_options(
         self,
         params: Dict,
@@ -86,6 +134,7 @@ class NVEncTranscoder:
         output_csp: Optional[str] = None,
         is_4k: bool = False,
         vmaf_subsample: int = 1,
+        fps: Optional[float] = None,
     ) -> List[str]:
         format = "av1"
         if "hevc" in encoder.lower():
@@ -96,6 +145,12 @@ class NVEncTranscoder:
         # Basic codec settings
         nvenc_opts_dict = {"codec": format}
         nvenc_opts_dict.update(params)
+
+        if "gop-len" not in nvenc_opts_dict:
+            if fps and fps > 0:
+                nvenc_opts_dict["gop-len"] = int(math.ceil(fps * 4))
+            else:
+                nvenc_opts_dict["gop-len"] = 96
 
         # HDR / Color handling - Always use auto/copy for maximum preservation
         nvenc_opts_dict.update({
@@ -205,6 +260,7 @@ class NVEncTranscoder:
             output_csp=source_video_info.get("output_csp"),
             is_4k=bool(source_video_info.get("is_4k")),
             vmaf_subsample=source_video_info.get("vmaf_subsample", 1),
+            fps=source_video_info.get("fps"),
         )
 
         cmd, cmd_print = self._build_nvenc_cmd(input_file, output_file, nvenc_opts)
@@ -248,10 +304,12 @@ class NVEncTranscoder:
 
         full_output = b"".join(output_chunks).decode("utf-8", errors="ignore")
         success = self._check_nvenc_success(process.returncode, full_output, output_file)
+        metrics = self._extract_quality_metrics(full_output)
 
         result = {
             "success": success,
             "encoder": encoder,
+            "quality": metrics,
             "timing": {
                 "encode_time": encode_end_time - encode_start_time,
                 "total_time": encode_end_time - encode_start_time

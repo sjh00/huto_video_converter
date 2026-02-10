@@ -9,21 +9,27 @@ class QualityPreset:
         "av1_nvenc": {
             "preset": "quality",
             "tune": "uhq",
-            "multipass": "2pass-full",
             "lookahead": 32, # 默认由preset和tune决定
             "bframes": 4, # 默认由preset和tune决定
             # "qvbr": 28, # 默认自动
             # "ref": 4, # 默认由preset和tune决定
+            # "multipass": "2pass-full",
+            "aq": None,
+            "aq-temporal": None,
+            "qp-max": "48:51:53",
             "parallel": "auto",
         },
         "hevc_nvenc": {
             "preset": "quality",
             "tune": "uhq",
-            "multipass": "2pass-full",
             "lookahead": 32, # 默认由preset和tune决定
             "bframes": 4, # 默认由preset和tune决定
             # "qvbr": 28, # 默认自动
             # "ref": 4, # 默认由preset和tune决定
+            # "multipass": "2pass-full",
+            "aq": None,
+            "aq-temporal": None,
+            "qp-max": "48:51:53",
             "parallel": "auto",
         },
     }

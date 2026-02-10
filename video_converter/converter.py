@@ -231,7 +231,7 @@ class VideoConverter:
         large_m2ts_files = self.detector.get_large_m2ts_files(directory)
 
         if not large_m2ts_files:
-            print(f"错误: 蓝光目录中未找到有价值的 M2TS 文件")
+            print("错误: 蓝光目录中未找到有价值的 M2TS 文件")
             return False
 
         print(f"发现 {len(large_m2ts_files)} 个有价值的 M2TS 文件，开始转换")

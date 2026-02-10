@@ -71,10 +71,12 @@ class MediaInfo:
         pix_fmt = (video_stream.get("pix_fmt") or "").lower()
         frame_count = None
         nb_frames = video_stream.get("nb_frames")
+        fps = self._parse_frame_rate(
+            video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate", "")
+        )
         if nb_frames and str(nb_frames).isdigit():
             frame_count = int(nb_frames)
         else:
-            fps = self._parse_frame_rate(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate", ""))
             duration = float(format_info.get("duration") or 0)
             if fps and duration:
                 frame_count = int(round(duration * fps))
@@ -112,6 +114,7 @@ class MediaInfo:
             "output_csp": output_csp,
             "is_4k": is_4k,
             "frame_count": frame_count,
+            "fps": fps,
             "vmaf_subsample": self._calculate_vmaf_subsample(frame_count),
             "audio_stream_pids": audio_stream_pids,
             "subtitle_stream_pids": subtitle_stream_pids,
