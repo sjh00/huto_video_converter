@@ -249,6 +249,9 @@ class MediaInfo:
             ET.SubElement(audio, "scantype").text = "progressive"
             ET.SubElement(audio, "channels").text = str(int(stream.get("channels") or 0))
             ET.SubElement(audio, "samplingrate").text = str(int(stream.get("sample_rate") or 0))
+            lang = stream.get("tags", {}).get("language", "")
+            if lang:
+                ET.SubElement(audio, "language").text = lang
             ET.SubElement(audio, "default").text = self._bool_text(int(stream.get("disposition", {}).get("default", 0)))
             ET.SubElement(audio, "forced").text = self._bool_text(int(stream.get("disposition", {}).get("forced", 0)))
         for stream in streams:
