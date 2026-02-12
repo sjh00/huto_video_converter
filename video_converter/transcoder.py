@@ -4,7 +4,6 @@ import sys
 import time
 import math
 from pathlib import Path
-from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 
 from .utils import Utils
@@ -51,33 +50,38 @@ class NVEncTranscoder:
                 return True
         return False
 
-    def _handle_existing_output(self, output_file: str) -> str:
-        output_path = Path(output_file)
-        if not output_path.exists():
-            return "transcode"
-
-        print(f"\n检测到输出文件已存在: {output_file}")
-        print(f"文件大小: {output_path.stat().st_size / (1024**2):.2f} MB")
-        print(
-            f"修改时间: {datetime.fromtimestamp(output_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        print("\n请选择处理方式:")
-        print("  1. 重新转码 (删除现有文件并重新转码)")
-        print("  2. 跳过 (继续处理下一个)")
-        print("  3. 放弃 (退出程序)")
-
-        while True:
-            choice = input("\n请输入选项 (1-3): ").strip()
-            if choice in ["1", "2", "3"]:
-                choice_res = ["transcode", "skip", "abort"][int(choice) - 1]
-                if choice_res == "transcode":
-                    print(f"删除现有文件: {output_file}")
-                    output_path.unlink(missing_ok=True)
-                return choice_res
-            print("无效选项，请重新输入")
+    def _parse_time_to_seconds(self, value: str) -> Optional[float]:
+        parts = value.strip().split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds = float(parts[2])
+        except ValueError:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
 
     def _extract_quality_metrics(self, output: str) -> Dict[str, float]:
         metrics: Dict[str, float] = {}
+        encoded_match = re.search(
+            r"\bencoded\s+\d+\s+frames.*?,\s*([0-9]+(?:\.[0-9]+)?)\s*kbps,"
+            r"\s*([0-9]+(?:\.[0-9]+)?)\s*MB",
+            output,
+            re.IGNORECASE,
+        )
+        if encoded_match:
+            metrics["encoded_kbps"] = float(encoded_match.group(1))
+            metrics["encoded_size_mb"] = float(encoded_match.group(2))
+        encode_time_match = re.search(
+            r"\bencode time\s*([0-9]+:[0-9]+:[0-9]+(?:\.[0-9]+)?)",
+            output,
+            re.IGNORECASE,
+        )
+        if encode_time_match:
+            seconds = self._parse_time_to_seconds(encode_time_match.group(1))
+            if seconds is not None:
+                metrics["encode_time_seconds"] = seconds
         vmaf_match = re.search(
             r"\bVMAF\b.*?\bScore\s*([0-9]+(?:\.[0-9]+)?)", output, re.IGNORECASE
         )
@@ -234,12 +238,6 @@ class NVEncTranscoder:
         source_video_info: Optional[Dict[str, object]] = None,
         qvbr: Optional[int] = None,
     ) -> Dict[str, any]:
-
-        handle_choice = self._handle_existing_output(output_file)
-        if handle_choice == "abort":
-            return {"success": False, "aborted": True}
-        elif handle_choice == "skip":
-            return {"success": False, "skipped": True}
 
         params = QualityPreset.get_params(encoder)
         if qvbr is not None:

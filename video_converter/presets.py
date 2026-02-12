@@ -12,8 +12,8 @@ class QualityPreset:
             # "lookahead": 32, # 默认由preset和tune决定
             "bframes": 4, # 默认由preset和tune决定
             "qvbr": 0,
-            # "ref": 4, # 默认由preset和tune决定
-            # "multipass": "2pass-full",
+            "ref": 4, # 默认由preset和tune决定
+            "multipass": "2pass-full",
             "aq": None,
             "aq-temporal": None,
             "qp-min": 0,
@@ -26,8 +26,8 @@ class QualityPreset:
             # "lookahead": 32, # 默认由preset和tune决定
             "bframes": 4, # 默认由preset和tune决定
             "qvbr": 0,
-            # "ref": 4, # 默认由preset和tune决定
-            # "multipass": "2pass-full",
+            "ref": 4, # 默认由preset和tune决定
+            "multipass": "2pass-full",
             "aq": None,
             "aq-temporal": None,
             "qp-min": 0,

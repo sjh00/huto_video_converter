@@ -74,12 +74,12 @@ class MediaInfo:
         fps = self._parse_frame_rate(
             video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate", "")
         )
+        duration_seconds = float(format_info.get("duration") or 0)
         if nb_frames and str(nb_frames).isdigit():
             frame_count = int(nb_frames)
         else:
-            duration = float(format_info.get("duration") or 0)
-            if fps and duration:
-                frame_count = int(round(duration * fps))
+            if fps and duration_seconds:
+                frame_count = int(round(duration_seconds * fps))
         bits = None
         for key in ("bits_per_raw_sample", "bits_per_sample"):
             value = video_stream.get(key)
@@ -109,6 +109,25 @@ class MediaInfo:
         elif "rgb" in pix_fmt or "gbr" in pix_fmt:
             output_csp = "rgb"
         is_4k = width >= 3840 or height >= 2160
+        size_bytes = 0
+        size_value = format_info.get("size")
+        if size_value:
+            try:
+                size_bytes = int(float(size_value))
+            except ValueError:
+                size_bytes = 0
+        bit_rate = 0
+        for key in ("bit_rate",):
+            value = format_info.get(key) or video_stream.get(key)
+            if value:
+                try:
+                    bit_rate = int(float(value))
+                except ValueError:
+                    bit_rate = 0
+                if bit_rate:
+                    break
+        if not bit_rate and size_bytes and duration_seconds:
+            bit_rate = int((size_bytes * 8) / duration_seconds)
         return {
             "output_depth": output_depth,
             "output_csp": output_csp,
@@ -118,6 +137,9 @@ class MediaInfo:
             "vmaf_subsample": self._calculate_vmaf_subsample(frame_count),
             "audio_stream_pids": audio_stream_pids,
             "subtitle_stream_pids": subtitle_stream_pids,
+            "duration_seconds": duration_seconds,
+            "bit_rate": bit_rate,
+            "size_bytes": size_bytes,
         }
 
     def map_audio_languages_by_pid(

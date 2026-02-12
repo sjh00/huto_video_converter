@@ -24,6 +24,7 @@
   - 使用 QVBR 码率控制模式
   - 默认 GOP 长度为 4 秒 (gop-len = ceil(fps * 4))
   - **内置质量评估**：支持 VMAF、SSIM、PSNR 质量评估 (由 NVEncC 直接计算)
+  - **QVBR 自动取值**：未指定时先测中间约 20 秒片段 (短片直接全片)，先用 0，再从 25 到 32 递增，目标 VMAF 96.5 以上 且码率低于原码率；若仍不满足则提示无需转码
 - **易用性**：
   - 自动跳过已处理文件
   - 简洁的命令行接口
@@ -69,6 +70,7 @@ python video_converter.py <输入文件或目录>
 - `-e, --encoder`: 视频编码器 (默认 `av1_nvenc`，可选 `hevc_nvenc`)
 - `-v, --enable-quality-eval`: 启用转换后的质量评估 (VMAF/SSIM/PSNR)
 - `-p, --nvenc-path`: 指定 NVEncC64.exe 的路径 (如果未在 PATH 中)
+- `--qvbr`: 指定 QVBR 值 (默认：自动，未指定将走自动取值逻辑)
 
 ### 使用示例
 

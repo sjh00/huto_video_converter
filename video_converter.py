@@ -71,7 +71,7 @@ def main():
         default=None,
         help="NVEncC64 可执行文件路径(默认: 自动检测)",
     )
-    parser.add_argument("--qvbr", type=int, help="指定 QVBR 值 (不指定则自动)")
+    parser.add_argument("--qvbr", type=int, help="指定 QVBR 值 (默认：自动)")
 
     args = parser.parse_args()
 

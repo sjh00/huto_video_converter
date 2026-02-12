@@ -1,4 +1,5 @@
 import sys
+import subprocess
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
@@ -69,6 +70,138 @@ class VideoConverter:
 
         return chapter_file, audio_langs, subtitle_langs, audio_pids, subtitle_pids
 
+    def _get_source_bitrate_kbps(self, source_video_info: Dict[str, object]) -> float:
+        bit_rate = float(source_video_info.get("bit_rate") or 0)
+        duration_seconds = float(source_video_info.get("duration_seconds") or 0)
+        size_bytes = float(source_video_info.get("size_bytes") or 0)
+        if bit_rate <= 0 and duration_seconds > 0 and size_bytes > 0:
+            bit_rate = (size_bytes * 8) / duration_seconds
+        if bit_rate <= 0:
+            return 0.0
+        return bit_rate / 1000.0
+
+    def _create_test_clip(self, input_file: str, duration_seconds: float) -> Tuple[str, bool]:
+        if duration_seconds <= 20:
+            return input_file, False
+        sample_duration = 20.0
+        start_time = max(0.0, (duration_seconds - sample_duration) / 2.0)
+        temp_dir = Path(__file__).parent.parent / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = temp_dir / f"{Path(input_file).stem}_sample_{timestamp}.mkv"
+        ffmpeg_path = Utils.find_tool("ffmpeg")
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start_time:.3f}",
+            "-t",
+            f"{sample_duration:.3f}",
+            "-i",
+            input_file,
+            "-map",
+            "0:v:0",
+            "-c",
+            "copy",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        if result.returncode != 0 or not output_path.exists():
+            print("警告: 采样片段截取失败，将使用全片测试")
+            output_path.unlink(missing_ok=True)
+            return input_file, False
+        return str(output_path), True
+
+    def _auto_select_qvbr(
+        self,
+        input_file: str,
+        encoder: str,
+        source_video_info: Dict[str, object],
+    ) -> Tuple[Optional[int], bool]:
+        duration_seconds = float(source_video_info.get("duration_seconds") or 0)
+        source_kbps = self._get_source_bitrate_kbps(source_video_info)
+        if duration_seconds <= 0:
+            return None, False
+        test_input, created_clip = self._create_test_clip(input_file, duration_seconds)
+        temp_dir = Path(__file__).parent.parent / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        tester = NVEncTranscoder(self.transcoder.nvenc_path, True)
+        candidates = [0] + list(range(25, 33))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        previous_candidate = None
+        last_candidate = None
+        last_vmaf = None
+        last_encoded_kbps = None
+        try:
+            for candidate in candidates:
+                temp_output = temp_dir / f"{Path(input_file).stem}_qvbr_{candidate}_{timestamp}.mkv"
+                temp_output.unlink(missing_ok=True)
+                result = tester.transcode(
+                    test_input,
+                    str(temp_output),
+                    encoder,
+                    "",
+                    None,
+                    None,
+                    source_video_info,
+                    candidate,
+                )
+                temp_output.unlink(missing_ok=True)
+                if result.get("aborted"):
+                    raise KeyboardInterrupt
+                if not result.get("success"):
+                    continue
+                metrics = result.get("quality", {})
+                vmaf = metrics.get("vmaf")
+                encoded_kbps = metrics.get("encoded_kbps")
+                i_avg_qp = metrics.get("i_avg_qp")
+                if vmaf is None or encoded_kbps is None:
+                    continue
+                last_candidate = candidate
+                last_vmaf = vmaf
+                last_encoded_kbps = encoded_kbps
+                if i_avg_qp is not None and i_avg_qp >= 51.0:
+                    break
+                if vmaf <= 96.5:
+                    return previous_candidate if previous_candidate is not None else candidate, False
+                previous_candidate = candidate
+        finally:
+            if created_clip and test_input != input_file:
+                Path(test_input).unlink(missing_ok=True)
+        if last_vmaf is not None and last_vmaf > 96.5:
+            if source_kbps > 0 and last_encoded_kbps is not None:
+                if last_encoded_kbps < source_kbps * 0.8:
+                    return last_candidate, False
+        return None, True
+
+    def _handle_existing_output(self, output_file: str) -> str:
+        output_path = Path(output_file)
+        if not output_path.exists():
+            return "transcode"
+
+        print(f"\n检测到输出文件已存在: {output_file}")
+        print(f"文件大小: {output_path.stat().st_size / (1024**2):.2f} MB")
+        print(
+            f"修改时间: {datetime.fromtimestamp(output_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        print("\n请选择处理方式:")
+        print("  1. 重新转码 (删除现有文件并重新转码)")
+        print("  2. 跳过 (继续处理下一个)")
+        print("  3. 放弃 (退出程序)")
+
+        while True:
+            choice = input("\n请输入选项 (1-3): ").strip()
+            if choice in ["1", "2", "3"]:
+                choice_res = ["transcode", "skip", "abort"][int(choice) - 1]
+                if choice_res == "transcode":
+                    print(f"删除现有文件: {output_file}")
+                    output_path.unlink(missing_ok=True)
+                return choice_res
+            print("无效选项，请重新输入")
+
     def convert_file(
         self,
         input_file: str,
@@ -107,6 +240,25 @@ class VideoConverter:
             if mapped_langs:
                 subtitle_langs = mapped_langs
 
+        handle_choice = self._handle_existing_output(output_file)
+        if handle_choice == "abort":
+            print(f"转换已中止: {input_file}")
+            sys.exit(0)
+        elif handle_choice == "skip":
+            print(f"已跳过: {input_file}")
+            self.media_info.write_nfo(output_file, encoder)
+            return True
+
+        if qvbr is None:
+            selected_qvbr, should_skip = self._auto_select_qvbr(
+                input_file, encoder, source_video_info
+            )
+            if should_skip:
+                print(f"\033[93m该视频无需转码: {input_file}\033[0m")
+                return True
+            if selected_qvbr is not None:
+                qvbr = selected_qvbr
+
         result = self.transcoder.transcode(
             input_file,
             output_file,
@@ -126,10 +278,6 @@ class VideoConverter:
         elif result.get("aborted", False):
             print(f"转换已中止: {input_file}")
             sys.exit(0)
-        elif result.get("skipped", False):
-            print(f"已跳过: {input_file}")
-            success = True
-            self.media_info.write_nfo(output_file, encoder)
         else:
             print(f"转换失败: {input_file}")
 
