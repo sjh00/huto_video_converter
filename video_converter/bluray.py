@@ -1,3 +1,4 @@
+import re
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
@@ -19,7 +20,7 @@ class BluRayDetector:
                 return False
 
         stream_dir = path / Constants.BLURAY_PATHS["STREAM"]
-        m2ts_files = list(stream_dir.glob("*.m2ts"))
+        m2ts_files = list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
         return len(m2ts_files) > 0
 
     @staticmethod
@@ -263,7 +264,7 @@ class BluRayDetector:
         if not stream_dir.exists():
             return None
 
-        m2ts_files = list(stream_dir.glob("*.m2ts"))
+        m2ts_files = list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
         if not m2ts_files:
             return None
 
@@ -279,7 +280,7 @@ class BluRayDetector:
         if not stream_dir.exists():
             return []
 
-        m2ts_files = list(stream_dir.glob("*.m2ts"))
+        m2ts_files = list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
         if not m2ts_files:
             return []
 
@@ -296,9 +297,10 @@ class BluRayDetector:
         if not playlist_dir.exists():
             return None
 
-        for mpls_file in playlist_dir.glob("*.mpls"):
-            m2ts_names = BluRayDetector.parse_mpls_file(mpls_file)
-            if m2ts_name in m2ts_names:
+        target_name = m2ts_name.lower()
+        for mpls_file in list(playlist_dir.glob("*.mpls")) + list(playlist_dir.glob("*.MPLS")):
+            m2ts_names = [name.lower() for name in BluRayDetector.parse_mpls_file(mpls_file)]
+            if target_name in m2ts_names:
                 return mpls_file
         return None
 
@@ -325,7 +327,28 @@ class BluRayDetector:
         path = Path(directory)
         if not path.is_dir():
             return False
-        return len(Utils.get_video_files(path)) > 1
+        if len(Utils.get_video_files(path)) > 1:
+            return True
+        for season_dir in BluRayDetector.get_season_dirs(directory):
+            if Utils.get_video_files(season_dir):
+                return True
+        return False
+
+    @staticmethod
+    def _is_season_dir_name(name: str) -> bool:
+        normalized = name.strip().lower()
+        return re.match(r"^(season\s*\d+|s\d{1,2})$", normalized) is not None
+
+    @staticmethod
+    def get_season_dirs(directory: str) -> List[Path]:
+        path = Path(directory)
+        if not path.is_dir():
+            return []
+        return [
+            p
+            for p in path.iterdir()
+            if p.is_dir() and BluRayDetector._is_season_dir_name(p.name)
+        ]
 
     @staticmethod
     def detect_structure(directory: str) -> str:

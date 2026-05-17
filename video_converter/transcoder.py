@@ -11,9 +11,15 @@ from .presets import QualityPreset
 
 
 class NVEncTranscoder:
-    def __init__(self, nvenc_path: str = None, enable_quality_eval: bool = False):
+    def __init__(
+        self,
+        nvenc_path: str = None,
+        enable_quality_eval: bool = False,
+        no_qp_max_limit: bool = False,
+    ):
         self.nvenc_path = nvenc_path or Utils.find_tool("NVEncC64")
         self.enable_quality_eval = enable_quality_eval
+        self.no_qp_max_limit = no_qp_max_limit
 
     def _filter_nvenc_output(self, output: str) -> Tuple[str, bool]:
         errors = []
@@ -134,6 +140,7 @@ class NVEncTranscoder:
         chapter_file: str = "",
         audio_langs: Dict[int, str] = None,
         subtitle_langs: Dict[int, str] = None,
+        audio_track_ids: Optional[List[int]] = None,
         output_depth: Optional[int] = None,
         output_csp: Optional[str] = None,
         is_4k: bool = False,
@@ -169,6 +176,8 @@ class NVEncTranscoder:
             "data-copy": None,
             "attachment-copy": None,
         })
+        if audio_track_ids:
+            nvenc_opts_dict["audio-copy"] = ",".join(str(idx) for idx in audio_track_ids)
 
         if output_depth in (8, 10):
             nvenc_opts_dict["output-depth"] = output_depth
@@ -227,6 +236,56 @@ class NVEncTranscoder:
         cmd_print = cmd_print.replace(output_file, f'"{output_file}"')
         return cmd, cmd_print
 
+    def _calculate_bitrate(
+        self,
+        bitrate: float,
+        size_bytes: float,
+        duration_seconds: float,
+        file_path: str,
+    ) -> int:
+        if bitrate and bitrate > 0:
+            return int(bitrate)
+        if size_bytes <= 0 and file_path:
+            try:
+                size_bytes = float(Path(file_path).stat().st_size)
+            except OSError:
+                size_bytes = 0
+        if size_bytes > 0 and duration_seconds > 0:
+            return int((size_bytes * 8) / duration_seconds)
+        return 0
+
+    def _print_bitrate_compression(
+        self,
+        source_video_info: Dict[str, object],
+        input_file: str,
+        output_file: str,
+        metrics: Dict[str, object],
+    ) -> None:
+        duration_seconds = float(source_video_info.get("duration_seconds") or 0)
+        if duration_seconds <= 0:
+            return
+        source_bitrate = self._calculate_bitrate(
+            float(source_video_info.get("bit_rate") or 0),
+            float(source_video_info.get("size_bytes") or 0),
+            duration_seconds,
+            input_file,
+        )
+        if source_bitrate <= 0:
+            return
+        output_bitrate = 0
+        encoded_kbps = metrics.get("encoded_kbps") if metrics else None
+        if encoded_kbps:
+            output_bitrate = int(float(encoded_kbps) * 1000)
+        if output_bitrate <= 0:
+            output_bitrate = self._calculate_bitrate(0, 0, duration_seconds, output_file)
+        if output_bitrate <= 0:
+            return
+        ratio = output_bitrate / source_bitrate
+        print(
+            f"码率压缩比: {ratio * 100:.1f}% (输出 {Utils.format_bitrate(output_bitrate)} / "
+            f"源 {Utils.format_bitrate(source_bitrate)})"
+        )
+
     def transcode(
         self,
         input_file: str,
@@ -237,11 +296,14 @@ class NVEncTranscoder:
         subtitle_langs: Dict[int, str] = None,
         source_video_info: Optional[Dict[str, object]] = None,
         qvbr: Optional[int] = None,
+        audio_track_ids: Optional[List[int]] = None,
     ) -> Dict[str, any]:
 
         params = QualityPreset.get_params(encoder)
         if qvbr is not None:
             params["qvbr"] = qvbr
+        if self.no_qp_max_limit:
+            params.pop("qp-max", None)
         if "gop-len" not in params:
             fps = source_video_info.get("fps")
             if fps and fps > 0:
@@ -256,6 +318,7 @@ class NVEncTranscoder:
             chapter_file=chapter_file,
             audio_langs=audio_langs,
             subtitle_langs=subtitle_langs,
+            audio_track_ids=audio_track_ids,
             output_depth=source_video_info.get("output_depth"),
             output_csp=source_video_info.get("output_csp"),
             is_4k=bool(source_video_info.get("is_4k")),
@@ -317,6 +380,7 @@ class NVEncTranscoder:
 
         if success:
             print(f"转码耗时: {result['timing']['encode_time']:.1f} 秒")
+            self._print_bitrate_compression(source_video_info, input_file, output_file, metrics)
         else:
             filtered_out, _ = self._filter_nvenc_output(full_output)
             print(f"转码失败:\n{filtered_out}")

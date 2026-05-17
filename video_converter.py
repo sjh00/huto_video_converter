@@ -71,7 +71,25 @@ def main():
         default=None,
         help="NVEncC64 可执行文件路径(默认: 自动检测)",
     )
-    parser.add_argument("--qvbr", type=int, help="指定 QVBR 值 (默认：自动)")
+    parser.add_argument("-q", "--qvbr", type=int, help="指定 QVBR 值 (默认：自动)")
+    parser.add_argument(
+        "-n", "--no-qp-max-limit",
+        action="store_true",
+        default=False,
+        help="不设置 qp-max 限制，允许 QVBR 进一步降低码率",
+    )
+    parser.add_argument(
+        "-t", "--test",
+        action="store_true",
+        default=False,
+        help="抽取视频中间 20 秒进行测试，仅支持单个视频",
+    )
+    parser.add_argument(
+        "-z", "--keep-default-zh-audio",
+        action="store_true",
+        default=False,
+        help="仅复制默认音轨和国语音轨",
+    )
 
     args = parser.parse_args()
 
@@ -98,7 +116,15 @@ def main():
             parser.print_help()
             sys.exit(1)
 
-    if len(args.input) > 1 and args.output:
+    if args.test:
+        if len(args.input) != 1:
+            print("错误: --test 仅支持单个视频")
+            sys.exit(1)
+        input_path = Path(args.input[0])
+        if not input_path.exists() or not input_path.is_file():
+            print("错误: --test 仅支持视频文件")
+            sys.exit(1)
+    if len(args.input) > 1 and args.output and not args.test:
         output_path = Path(args.output)
         if output_path.suffix:
             print("错误: 多输入时输出必须为目录")
@@ -107,6 +133,8 @@ def main():
     converter = VideoConverter(
         args.nvenc_path,
         args.enable_quality_eval,
+        args.no_qp_max_limit,
+        args.keep_default_zh_audio,
     )
 
     GREEN = "\033[92m"
@@ -114,13 +142,24 @@ def main():
     YELLOW = "\033[93m"
     RESET = "\033[0m"
 
+    if args.test:
+        success = converter.test_encode(
+            str(Path(args.input[0])),
+            args.output,
+            args.encoder,
+            args.qvbr,
+        )
+        sys.exit(0 if success else 1)
+
     total = len(args.input)
     success_count = 0
     fail_count = 0
+    failed_files = []
     for idx, input_path in enumerate(args.input, 1):
         if not Path(input_path).exists():
             print(f"错误: 未找到输入: {input_path}")
             fail_count += 1
+            failed_files.append(input_path)
             continue
 
         print(f"\n{'=' * 70}")
@@ -140,12 +179,38 @@ def main():
         else:
             print(f"\n{RED}转换失败!{RESET}")
             fail_count += 1
+            failed_files.append(input_path)
 
     if total > 0:
+        skip_count = converter.skip_count
+        skipped_files = converter.skipped_files
         if fail_count == 0:
-            print(f"\n{GREEN}汇总: {success_count}/{total} 成功{RESET}")
+            if skip_count > 0:
+                print(
+                    f"\n{GREEN}汇总: {success_count}/{total} 成功{RESET}, "
+                    f"{YELLOW}{skip_count} 跳过{RESET}"
+                )
+            else:
+                print(f"\n{GREEN}汇总: {success_count}/{total} 成功{RESET}")
         else:
-            print(f"\n汇总: {success_count}/{total} 成功, {YELLOW}{fail_count} 失败{RESET}")
+            if skip_count > 0:
+                print(
+                    f"\n汇总: {success_count}/{total} 成功, "
+                    f"{YELLOW}{skip_count} 跳过{RESET}, "
+                    f"{YELLOW}{fail_count} 失败{RESET}"
+                )
+            else:
+                print(
+                    f"\n汇总: {success_count}/{total} 成功, {YELLOW}{fail_count} 失败{RESET}"
+                )
+        if skipped_files:
+            print(f"\n{YELLOW}跳过列表:{RESET}")
+            for item in skipped_files:
+                print(f"- {item}")
+        if failed_files:
+            print(f"\n{RED}失败列表:{RESET}")
+            for item in failed_files:
+                print(f"- {item}")
 
     if fail_count > 0:
         sys.exit(1)

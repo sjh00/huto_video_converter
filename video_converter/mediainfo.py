@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 
 from .utils import Utils
 
@@ -29,7 +29,7 @@ class MediaInfo:
             return resolved
         return None
 
-    def _run_ffprobe(self, media_path: str) -> Optional[Dict]:
+    def _run_ffprobe(self, media_path: str, include_chapters: bool = False) -> Optional[Dict]:
         ffprobe_path = self._ffprobe_path()
         if not ffprobe_path:
             return None
@@ -39,8 +39,10 @@ class MediaInfo:
             "-print_format", "json",
             "-show_format",
             "-show_streams",
-            media_path,
         ]
+        if include_chapters:
+            cmd.append("-show_chapters")
+        cmd.append(media_path)
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
         if result.returncode != 0:
             return None
@@ -48,6 +50,45 @@ class MediaInfo:
             return json.loads(result.stdout)
         except json.JSONDecodeError:
             return None
+
+    def extract_duration_info(self, media_path: str) -> Dict[str, float]:
+        data = self._run_ffprobe(media_path)
+        if not data:
+            return {}
+        streams = data.get("streams", [])
+        format_info = data.get("format", {})
+        video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
+        format_duration = float(format_info.get("duration") or 0)
+        video_duration = float(video_stream.get("duration") or 0)
+        if not video_duration:
+            fps = self._parse_frame_rate(
+                video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate", "")
+            )
+            nb_frames = video_stream.get("nb_frames")
+            if nb_frames and str(nb_frames).isdigit() and fps:
+                video_duration = float(nb_frames) / fps
+        return {
+            "format_duration": format_duration,
+            "video_duration": video_duration,
+        }
+
+    def extract_chapters(self, media_path: str) -> List[Tuple[float, str]]:
+        data = self._run_ffprobe(media_path, include_chapters=True)
+        if not data:
+            return []
+        chapters = []
+        for idx, chapter in enumerate(data.get("chapters", []), 1):
+            start_time = chapter.get("start_time")
+            title = chapter.get("tags", {}).get("title") or f"Chapter {idx}"
+            if start_time is None:
+                continue
+            try:
+                start_seconds = float(start_time)
+            except ValueError:
+                continue
+            chapters.append((start_seconds, title))
+        chapters.sort(key=lambda x: x[0])
+        return chapters
 
     def extract_source_video_info(self, input_file: str) -> Dict[str, Optional[object]]:
         data = self._run_ffprobe(input_file)
@@ -75,11 +116,18 @@ class MediaInfo:
             video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate", "")
         )
         duration_seconds = float(format_info.get("duration") or 0)
+        if not duration_seconds:
+            video_duration = float(video_stream.get("duration") or 0)
+            if video_duration:
+                duration_seconds = video_duration
         if nb_frames and str(nb_frames).isdigit():
             frame_count = int(nb_frames)
         else:
             if fps and duration_seconds:
                 frame_count = int(round(duration_seconds * fps))
+            elif fps and nb_frames and str(nb_frames).isdigit():
+                duration_seconds = int(nb_frames) / fps
+                frame_count = int(nb_frames)
         bits = None
         for key in ("bits_per_raw_sample", "bits_per_sample"):
             value = video_stream.get(key)
@@ -141,6 +189,29 @@ class MediaInfo:
             "bit_rate": bit_rate,
             "size_bytes": size_bytes,
         }
+
+    def extract_audio_tracks(self, input_file: str) -> List[Dict[str, object]]:
+        data = self._run_ffprobe(input_file)
+        if not data:
+            return []
+        tracks: List[Dict[str, object]] = []
+        audio_index = 0
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") != "audio":
+                continue
+            tags = stream.get("tags", {}) or {}
+            language = (tags.get("language") or "").lower()
+            disposition = stream.get("disposition", {}) or {}
+            is_default = bool(int(disposition.get("default", 0) or 0))
+            tracks.append(
+                {
+                    "index": audio_index + 1,
+                    "language": language,
+                    "is_default": is_default,
+                }
+            )
+            audio_index += 1
+        return tracks
 
     def map_audio_languages_by_pid(
         self,

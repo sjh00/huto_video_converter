@@ -13,11 +13,12 @@ class QualityPreset:
             "bframes": 4, # 默认由preset和tune决定
             "qvbr": 0,
             "ref": 4, # 默认由preset和tune决定
-            "multipass": "2pass-full",
+            # "multipass": "2pass-full",
             "aq": None,
             "aq-temporal": None,
             "qp-min": 0,
-            "qp-max": "0:51:51",
+            # "qp-max": "0:51:51",
+            "qp-max": "0:150:150",
             "parallel": "auto",
         },
         "hevc_nvenc": {
@@ -27,11 +28,12 @@ class QualityPreset:
             "bframes": 4, # 默认由preset和tune决定
             "qvbr": 0,
             "ref": 4, # 默认由preset和tune决定
-            "multipass": "2pass-full",
+            # "multipass": "2pass-full",
             "aq": None,
             "aq-temporal": None,
             "qp-min": 0,
-            "qp-max": "0:51:51",
+            # "qp-max": "0:51:51",
+            "qp-max": "0:150:150",
             "parallel": "auto",
         },
     }
