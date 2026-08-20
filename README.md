@@ -1,4 +1,4 @@
-# NVEnc Video Converter
+# Huto Video Converter
 
 基于 NVEncC 的高性能视频转码工具，专为 NVIDIA 显卡优化。支持将视频转换为 AV1/HEVC 编码 + MKV 容器，同时完整保留原始音轨、字幕和章节信息。
 
@@ -45,8 +45,8 @@
 
 2. 克隆本项目：
    ```bash
-   git clone <repository_url>
-   cd ffmpeg_video_convert
+   git clone https://github.com/sjh00/huto_video_converter.git
+   cd huto_video_converter
    ```
 
 3. 安装开发依赖 (可选，仅用于代码格式化)：
@@ -120,4 +120,4 @@ python video_converter.py <输入文件或目录>
 
 ## 许可证
 
-本项目仅供个人学习和使用。
+本项目采用 [MIT License](LICENSE)。

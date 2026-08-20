@@ -223,19 +223,25 @@ class VideoConverter:
         temp_dir.mkdir(parents=True, exist_ok=True)
         tester = NVEncTranscoder(self.transcoder.nvenc_path, True, self.no_qp_max_limit)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target_vmaf = 96.0
+        lowest_vmaf = 90.0
         low = 25
         high = 45
         best_over_candidate = None
         best_over_metrics = None
         best_under_candidate = None
         best_under_metrics = None
-        min_tested_candidate = None
-        min_tested_metrics = None
 
-        def is_too_low_quality(vmaf: float, i_avg_qp: Optional[float], exp_vmaf: float = 97.0) -> bool:
-            return not vmaf or vmaf <= exp_vmaf or (
+        def has_qp_issue(i_avg_qp: Optional[float]) -> bool:
+            return (
                 not self.no_qp_max_limit and i_avg_qp is not None and i_avg_qp >= 150.0
             )
+
+        def meets_target_quality(vmaf: Optional[float], i_avg_qp: Optional[float]) -> bool:
+            return bool(vmaf and vmaf >= target_vmaf and not has_qp_issue(i_avg_qp))
+
+        def meets_lowest_quality(vmaf: Optional[float], i_avg_qp: Optional[float]) -> bool:
+            return bool(vmaf and vmaf >= lowest_vmaf and not has_qp_issue(i_avg_qp))
 
         def is_compressed_enough(encoded_kbps: Optional[float]) -> bool:
             return source_kbps > 0 and encoded_kbps is not None and encoded_kbps < source_kbps * 0.8
@@ -274,34 +280,42 @@ class VideoConverter:
                     low = mid + 1
                     continue
                 vmaf, encoded_kbps, i_avg_qp = result
-                if min_tested_candidate is None or mid < min_tested_candidate:
-                    min_tested_candidate = mid
-                    min_tested_metrics = (vmaf, encoded_kbps, i_avg_qp)
-                if is_too_low_quality(vmaf, i_avg_qp):
-                    best_under_candidate = mid
-                    best_under_metrics = (vmaf, encoded_kbps, i_avg_qp)
-                    high = mid - 1
-                else:
+                if meets_target_quality(vmaf, i_avg_qp):
                     best_over_candidate = mid
                     best_over_metrics = (vmaf, encoded_kbps, i_avg_qp)
                     low = mid + 1
+                    continue
+                if meets_lowest_quality(vmaf, i_avg_qp):
+                    if (
+                        best_under_metrics is None
+                        or abs(target_vmaf - vmaf) < abs(target_vmaf - best_under_metrics[0])
+                        or (
+                            abs(target_vmaf - vmaf) == abs(target_vmaf - best_under_metrics[0])
+                            and mid > best_under_candidate
+                        )
+                    ):
+                        best_under_candidate = mid
+                        best_under_metrics = (vmaf, encoded_kbps, i_avg_qp)
+                high = mid - 1
         finally:
             if created_clip and test_input != input_file:
                 Path(test_input).unlink(missing_ok=True)
 
-        if best_under_candidate is not None:
-            if best_over_candidate is not None:
-                _candidate = best_over_candidate
-                _best_vmaf, _best_encoded_kbps, _best_i_avg_qp = best_over_metrics
-            else:
-                _candidate = best_under_candidate
-                _best_vmaf, _best_encoded_kbps, _best_i_avg_qp = best_under_metrics
-            if not is_too_low_quality(_best_vmaf, _best_i_avg_qp) and is_compressed_enough(_best_encoded_kbps):
-                return _candidate, False
-        if min_tested_metrics is not None:
-            _min_vmaf, _min_encoded_kbps, _min_i_avg_qp = min_tested_metrics
-            if not is_too_low_quality(_min_vmaf, _min_i_avg_qp, exp_vmaf=95.0) and is_compressed_enough(_min_encoded_kbps):
-                return min_tested_candidate, False
+        if best_over_metrics is not None:
+            best_vmaf, best_encoded_kbps, _best_i_avg_qp = best_over_metrics
+            if is_compressed_enough(best_encoded_kbps):
+                print(
+                    f"自动选择 QVBR={best_over_candidate}，VMAF={best_vmaf:.2f}，达到目标 {target_vmaf:.1f}"
+                )
+                return best_over_candidate, False
+        if best_under_metrics is not None:
+            best_vmaf, best_encoded_kbps, _best_i_avg_qp = best_under_metrics
+            if is_compressed_enough(best_encoded_kbps):
+                print(
+                    f"自动选择 QVBR={best_under_candidate}，VMAF={best_vmaf:.2f}，"
+                    f"未达到目标 {target_vmaf:.1f}，但达到最低阈值 {lowest_vmaf:.1f}"
+                )
+                return best_under_candidate, False
         return None, True
 
     def _handle_existing_output(self, output_file: str) -> str:
