@@ -1,10 +1,22 @@
+[project]
+name = "huto-video-converter"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "black>=24.3",
+    "ruff>=0.4",
+]
+
 [tool.black]
 line-length = 100
-target-version = ["py37"]
+target-version = ["py312"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py37"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]

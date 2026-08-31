@@ -5,36 +5,21 @@ from .constants import Constants
 class QualityPreset:
     encoders = ["av1_nvenc", "hevc_nvenc"]
 
+    _common_params = {
+        "preset": "quality",
+        "tune": "uhq",
+        "qvbr": 0,
+        "qp-min": 0,
+        "qp-max": "0:150:150",
+        "parallel": "auto",
+    }
+
     encoder_params = {
-        "av1_nvenc": {
-            "preset": "quality",
-            "tune": "uhq",
-            # "lookahead": 32, # 默认由preset和tune决定
-            "bframes": 4, # 默认由preset和tune决定
-            "qvbr": 0,
-            "ref": 4, # 默认由preset和tune决定
-            # "multipass": "2pass-full",
-            "aq": None,
-            "aq-temporal": None,
-            "qp-min": 0,
-            # "qp-max": "0:51:51",
-            "qp-max": "0:150:150",
-            "parallel": "auto",
-        },
-        "hevc_nvenc": {
-            "preset": "quality",
-            "tune": "uhq",
-            # "lookahead": 32, # 默认由preset和tune决定
-            "bframes": 4, # 默认由preset和tune决定
-            "qvbr": 0,
-            "ref": 4, # 默认由preset和tune决定
-            # "multipass": "2pass-full",
-            "aq": None,
-            "aq-temporal": None,
-            "qp-min": 0,
-            # "qp-max": "0:51:51",
-            "qp-max": "0:150:150",
-            "parallel": "auto",
+        "av1_nvenc": dict(_common_params),
+        "hevc_nvenc": dict(_common_params),
+        "svt_av1": {
+            "preset": 5,
+            "tune": 0,
         },
     }
 

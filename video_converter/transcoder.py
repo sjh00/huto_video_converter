@@ -8,6 +8,7 @@ from typing import List, Dict, Tuple, Optional
 
 from .utils import Utils
 from .presets import QualityPreset
+from .constants import Constants
 
 
 class NVEncTranscoder:
@@ -16,10 +17,12 @@ class NVEncTranscoder:
         nvenc_path: str = None,
         enable_quality_eval: bool = False,
         no_qp_max_limit: bool = False,
+        keep_grain: bool = True,
     ):
         self.nvenc_path = nvenc_path or Utils.find_tool("NVEncC64")
         self.enable_quality_eval = enable_quality_eval
         self.no_qp_max_limit = no_qp_max_limit
+        self.keep_grain = keep_grain
 
     def _filter_nvenc_output(self, output: str) -> Tuple[str, bool]:
         errors = []
@@ -93,6 +96,16 @@ class NVEncTranscoder:
         )
         if vmaf_match:
             metrics["vmaf"] = float(vmaf_match.group(1))
+        ssimu2_match = re.search(
+            r"\bSSIMU2\b.*?\bScore\s*([0-9]+(?:\.[0-9]+)?)", output, re.IGNORECASE
+        )
+        if ssimu2_match:
+            metrics["ssimu2"] = float(ssimu2_match.group(1))
+        butter_match = re.search(
+            r"\bButteraugli\b.*?normQ:\s*([0-9]+(?:\.[0-9]+)?)", output, re.IGNORECASE
+        )
+        if butter_match:
+            metrics["butteraugli"] = float(butter_match.group(1))
         ssim_match = re.search(
             r"\bSSIM\b.*?\bAll:\s*([0-9]+(?:\.[0-9]+)?)",
             output,
@@ -146,14 +159,13 @@ class NVEncTranscoder:
         is_4k: bool = False,
         vmaf_subsample: int = 1,
     ) -> List[str]:
-        format = "av1"
+        codec = "av1"
         if "hevc" in encoder.lower():
-            format = "hevc"
+            codec = "hevc"
         elif "h264" in encoder.lower():
-            format = "h264"
+            codec = "h264"
 
-        # Basic codec settings
-        nvenc_opts_dict = {"codec": format}
+        nvenc_opts_dict = {"codec": codec}
         nvenc_opts_dict.update(params)
 
         # HDR / Color handling - Always use auto/copy for maximum preservation
@@ -214,12 +226,15 @@ class NVEncTranscoder:
         if self.enable_quality_eval:
             vmaf_params = []
             if is_4k:
-                vmaf_params.append("model=vmaf_4k_v0.6.1")
+                vmaf_params.append("model=vmaf_4k_v0.6.1neg")
+            else:
+                vmaf_params.append("model=vmaf_v0.6.1neg")
             if vmaf_subsample > 1:
                 vmaf_params.append(f"subsample={vmaf_subsample}")
             nvenc_opts_dict["vmaf"] = ",".join(vmaf_params) if vmaf_params else None
             nvenc_opts_dict["ssim"] = None
             nvenc_opts_dict["psnr"] = None
+            nvenc_opts_dict["vship-ssimulacra2"] = None
 
         nvenc_opts = []
         for k, v in nvenc_opts_dict.items():
@@ -286,6 +301,335 @@ class NVEncTranscoder:
             f"源 {Utils.format_bitrate(source_bitrate)})"
         )
 
+    def _svt_gop_len(
+        self, source_video_info: Dict[str, object], gop_len: Optional[int]
+    ) -> int:
+        if gop_len is not None and gop_len > 0:
+            return int(gop_len)
+        fps = source_video_info.get("fps")
+        if fps and fps > 0:
+            return math.ceil(float(fps) * 4)
+        return 96
+
+    def _chapter_xml_to_ffmetadata(self, chapter_file: str, duration_seconds: float) -> str:
+        try:
+            text = Path(chapter_file).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        starts = re.findall(r"<ChapterTimeStart>([^<]+)</ChapterTimeStart>", text)
+        names = re.findall(r"<ChapterString>([^<]+)</ChapterString>", text)
+        if not starts:
+            return ""
+
+        def to_seconds(value: str) -> Optional[float]:
+            parts = value.strip().split(":")
+            if len(parts) != 3:
+                return None
+            try:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            except ValueError:
+                return None
+
+        entries = []
+        for idx, start_text in enumerate(starts):
+            start = to_seconds(start_text)
+            if start is None:
+                continue
+            title = names[idx] if idx < len(names) else f"Chapter {idx + 1}"
+            entries.append((start, title))
+        if not entries:
+            return ""
+        if duration_seconds <= 0:
+            duration_seconds = entries[-1][0] + 1.0
+        lines = [";FFMETADATA1"]
+        for idx, (start, title) in enumerate(entries):
+            if start >= duration_seconds:
+                continue
+            end = (
+                entries[idx + 1][0] if idx + 1 < len(entries) else duration_seconds
+            )
+            end = min(end, duration_seconds)
+            if end <= start:
+                continue
+            lines.extend(
+                [
+                    "[CHAPTER]",
+                    "TIMEBASE=1/1000",
+                    f"START={int(start * 1000)}",
+                    f"END={int(end * 1000)}",
+                    f"title={title}",
+                ]
+            )
+        if len(lines) <= 1:
+            return ""
+        meta_path = Path(chapter_file).with_suffix(".ffmeta")
+        meta_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(meta_path)
+
+    def _parse_ffmpeg_video_kbps(self, output: str) -> Optional[float]:
+        match = re.search(
+            r"video:\s*([0-9]+)\s*KiB.*?time=\s*([0-9]+:[0-9]+:[0-9]+(?:\.[0-9]+)?)",
+            output,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            kib = float(match.group(1))
+            seconds = self._parse_time_to_seconds(match.group(2))
+            if seconds and seconds > 0:
+                return kib * 1024 * 8 / seconds / 1000.0
+        match = re.search(
+            r"\bLsize=.*?bitrate=\s*([0-9]+(?:\.[0-9]+)?)\s*kbits/s",
+            output,
+            re.IGNORECASE,
+        )
+        if match:
+            return float(match.group(1))
+        return None
+
+    def _evaluate_ffmpeg_vmaf(
+        self,
+        encoded_file: str,
+        reference_file: str,
+        is_4k: bool,
+        vmaf_subsample: int,
+    ) -> Optional[float]:
+        model = "version=vmaf_4k_v0.6.1neg" if is_4k else "version=vmaf_v0.6.1neg"
+        subsample = max(1, int(vmaf_subsample or 1))
+        lavfi = (
+            "[0:v]setpts=PTS-STARTPTS[main];"
+            "[1:v]setpts=PTS-STARTPTS[ref];"
+            f"[main][ref]libvmaf=model={model}:n_threads=0:n_subsample={subsample}"
+        )
+        cmd = [
+            Utils.find_tool("ffmpeg"),
+            "-hide_banner",
+            "-i",
+            encoded_file,
+            "-i",
+            reference_file,
+            "-lavfi",
+            lavfi,
+            "-f",
+            "null",
+            "-",
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        match = re.search(r"VMAF score:\s*([0-9]+(?:\.[0-9]+)?)", log, re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+        return None
+
+    def _build_svt_cmd(
+        self,
+        input_file: str,
+        output_file: str,
+        crf: int,
+        source_video_info: Dict[str, object],
+        chapter_file: str,
+        audio_langs: Optional[Dict[int, str]],
+        subtitle_langs: Optional[Dict[int, str]],
+        audio_track_ids: Optional[List[int]],
+        gop_len: Optional[int],
+    ) -> Tuple[List[str], str, List[str]]:
+        params = QualityPreset.get_params("svt_av1")
+        preset = int(params.get("preset") or 5)
+        tune = int(params.get("tune") if params.get("tune") is not None else 0)
+        keyint = self._svt_gop_len(source_video_info, gop_len)
+        depth = source_video_info.get("output_depth")
+        pix_fmt = "yuv420p10le" if depth != 8 else "yuv420p"
+        svt_parts = [
+            f"tune={tune}",
+            "film-grain=0",
+            f"keyint={keyint}",
+        ]
+        extras_to_delete: List[str] = []
+        cmd = [
+            Utils.find_tool("ffmpeg"),
+            "-y",
+            "-hide_banner",
+            "-i",
+            input_file,
+        ]
+        ffmeta = ""
+        if chapter_file:
+            ffmeta = self._chapter_xml_to_ffmetadata(
+                chapter_file, float(source_video_info.get("duration_seconds") or 0)
+            )
+            if ffmeta:
+                cmd.extend(["-i", ffmeta])
+                extras_to_delete.append(ffmeta)
+        cmd.extend(["-map", "0:v:0"])
+        if audio_track_ids:
+            for track_id in audio_track_ids:
+                if track_id and int(track_id) > 0:
+                    cmd.extend(["-map", f"0:a:{int(track_id) - 1}"])
+        else:
+            cmd.extend(["-map", "0:a?"])
+        cmd.extend(["-map", "0:s?", "-map", "0:d?", "-map", "0:t?"])
+        cmd.extend(
+            [
+                "-c:v",
+                "libsvtav1",
+                "-preset",
+                str(preset),
+                "-crf",
+                str(crf),
+                "-pix_fmt",
+                pix_fmt,
+                "-svtav1-params",
+                ":".join(svt_parts),
+            ]
+        )
+        color_flags = [
+            ("color_primaries", "color_primaries"),
+            ("color_trc", "color_transfer"),
+            ("colorspace", "color_space"),
+            ("color_range", "color_range"),
+        ]
+        for ffmpeg_key, info_key in color_flags:
+            value = source_video_info.get(info_key)
+            if value:
+                cmd.extend([f"-{ffmpeg_key}", str(value)])
+        cmd.extend(["-c:a", "copy", "-c:s", "copy", "-c:d", "copy", "-c:t", "copy"])
+        cmd.extend(["-map_metadata", "0"])
+        if ffmeta:
+            cmd.extend(["-map_chapters", "1"])
+        else:
+            cmd.extend(["-map_chapters", "0"])
+        if audio_langs:
+            for idx in sorted(audio_langs.keys()):
+                lang = audio_langs.get(idx)
+                if lang:
+                    cmd.extend(["-metadata:s:a:" + str(idx), f"language={lang}"])
+        if subtitle_langs:
+            for idx in sorted(subtitle_langs.keys()):
+                lang = subtitle_langs.get(idx)
+                if lang:
+                    cmd.extend(["-metadata:s:s:" + str(idx), f"language={lang}"])
+        cmd.append(output_file)
+        cmd_print = " ".join(f'"{p}"' if " " in str(p) else str(p) for p in cmd)
+        return cmd, cmd_print, extras_to_delete
+
+    def _run_process(self, cmd: List[str]) -> Tuple[int, str, bool]:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+            text=False,
+        )
+        output_chunks: List[bytes] = []
+        try:
+            while True:
+                chunk = process.stdout.read(1024)
+                if chunk == b"":
+                    if process.poll() is not None:
+                        break
+                    continue
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                output_chunks.append(chunk)
+        except KeyboardInterrupt:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            return -1, "", True
+        process.wait()
+        full_output = b"".join(output_chunks).decode("utf-8", errors="ignore")
+        return process.returncode, full_output, False
+
+    def _transcode_svt(
+        self,
+        input_file: str,
+        output_file: str,
+        encoder: str,
+        chapter_file: str,
+        audio_langs: Optional[Dict[int, str]],
+        subtitle_langs: Optional[Dict[int, str]],
+        source_video_info: Dict[str, object],
+        crf: Optional[int],
+        audio_track_ids: Optional[List[int]],
+        gop_len: Optional[int],
+    ) -> Dict[str, any]:
+        if crf is None:
+            crf = 16 if self.keep_grain else 26
+        cmd, cmd_print, extras = self._build_svt_cmd(
+            input_file,
+            output_file,
+            crf,
+            source_video_info,
+            chapter_file,
+            audio_langs,
+            subtitle_langs,
+            audio_track_ids,
+            gop_len,
+        )
+        print(f"\n命令: {cmd_print}")
+        print(f"\n开始转码: {Path(input_file).name} (SVT-AV1 CRF={crf})")
+        encode_start_time = time.time()
+        try:
+            returncode, full_output, aborted = self._run_process(cmd)
+        finally:
+            if chapter_file:
+                Path(chapter_file).unlink(missing_ok=True)
+            for extra in extras:
+                Path(extra).unlink(missing_ok=True)
+        encode_end_time = time.time()
+        if aborted:
+            return {"success": False, "aborted": True}
+        success = returncode == 0 and Path(output_file).exists()
+        metrics: Dict[str, float] = {}
+        encoded_kbps = self._parse_ffmpeg_video_kbps(full_output)
+        if encoded_kbps is not None:
+            metrics["encoded_kbps"] = encoded_kbps
+        if success and encoded_kbps is None:
+            duration_seconds = float(source_video_info.get("duration_seconds") or 0)
+            if duration_seconds > 0:
+                metrics["encoded_kbps"] = self._calculate_bitrate(
+                    0, 0, duration_seconds, output_file
+                ) / 1000.0
+        if success and self.enable_quality_eval:
+            print("正在计算 VMAF...")
+            vmaf = self._evaluate_ffmpeg_vmaf(
+                output_file,
+                input_file,
+                bool(source_video_info.get("is_4k")),
+                int(source_video_info.get("vmaf_subsample") or 1),
+            )
+            if vmaf is not None:
+                metrics["vmaf"] = vmaf
+                print(f"VMAF: {vmaf:.4f}")
+            else:
+                print("警告: 未能解析 VMAF")
+        result = {
+            "success": success,
+            "encoder": encoder,
+            "quality": metrics,
+            "timing": {
+                "encode_time": encode_end_time - encode_start_time,
+                "total_time": encode_end_time - encode_start_time,
+            },
+        }
+        if success:
+            print(f"转码耗时: {result['timing']['encode_time']:.1f} 秒")
+            self._print_bitrate_compression(
+                source_video_info, input_file, output_file, metrics
+            )
+        else:
+            print("转码失败")
+            if full_output:
+                tail = "\n".join(full_output.strip().splitlines()[-20:])
+                print(tail)
+        return result
+
     def transcode(
         self,
         input_file: str,
@@ -297,21 +641,43 @@ class NVEncTranscoder:
         source_video_info: Optional[Dict[str, object]] = None,
         qvbr: Optional[int] = None,
         audio_track_ids: Optional[List[int]] = None,
+        gop_len: Optional[int] = None,
     ) -> Dict[str, any]:
+        source_video_info = source_video_info or {}
+        if Constants.is_svt_encoder(encoder):
+            return self._transcode_svt(
+                input_file,
+                output_file,
+                encoder,
+                chapter_file,
+                audio_langs,
+                subtitle_langs,
+                source_video_info,
+                qvbr,
+                audio_track_ids,
+                gop_len,
+            )
 
         params = QualityPreset.get_params(encoder)
         if qvbr is not None:
             params["qvbr"] = qvbr
         if self.no_qp_max_limit:
             params.pop("qp-max", None)
-        if "gop-len" not in params:
+        is_4k = bool(source_video_info.get("is_4k"))
+        if "max-bitrate" not in params:
+            params["max-bitrate"] = 100000 if is_4k else 40000
+        if self.keep_grain:
+            params["tf-level"] = 0
+            params["no-i-adapt"] = None
+            params["no-b-adapt"] = None
+        if gop_len is not None:
+            params["gop-len"] = gop_len
+        elif "gop-len" not in params:
             fps = source_video_info.get("fps")
             if fps and fps > 0:
-                params["gop-len"] = int(math.ceil(fps * 4))
+                params["gop-len"] = math.ceil(fps * 4)
             else:
                 params["gop-len"] = 96
-
-        source_video_info = source_video_info or {}
         nvenc_opts = self._get_nvenc_options(
             params,
             encoder=encoder,

@@ -20,8 +20,15 @@ class BluRayDetector:
                 return False
 
         stream_dir = path / Constants.BLURAY_PATHS["STREAM"]
-        m2ts_files = list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
-        return len(m2ts_files) > 0
+        return len(BluRayDetector.glob_m2ts(stream_dir)) > 0
+
+    @staticmethod
+    def glob_m2ts(stream_dir: Path) -> List[Path]:
+        return list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
+
+    @staticmethod
+    def glob_mpls(playlist_dir: Path) -> List[Path]:
+        return list(playlist_dir.glob("*.mpls")) + list(playlist_dir.glob("*.MPLS"))
 
     @staticmethod
     def _parse_mpls(mpls_path: Path):
@@ -129,49 +136,6 @@ class BluRayDetector:
         }
 
     @staticmethod
-    def parse_mpls_audio_languages(mpls_path: Path) -> Dict[int, str]:
-        return BluRayDetector.parse_mpls_stream_info(mpls_path).get("audio_languages", {})
-
-    @staticmethod
-    def _find_pes_packets(data: bytes) -> List[Tuple[int, int]]:
-        pes_packets = []
-        for i in range(len(data) - 10):
-            if data[i] == 0x00 and data[i + 1] == 0x00 and data[i + 2] == 0x01:
-                stream_id = data[i + 3]
-                if stream_id in Constants.PES_STREAM_IDS:
-                    pes_packets.append((i, stream_id))
-        return pes_packets
-
-    @staticmethod
-    def _find_ts_packet_for_pes(data: bytes, pes_pos: int) -> Optional[int]:
-        ts_pos = pes_pos
-        while ts_pos > 0:
-            if data[ts_pos] == Constants.TS_SYNC_BYTE:
-                if ts_pos + 188 <= len(data):
-                    return ts_pos
-                break
-            ts_pos -= 1
-        return None
-
-    @staticmethod
-    def parse_m2ts_pesid(m2ts_path: Path) -> Dict[str, str]:
-        pesid_map = {}
-        try:
-            with open(m2ts_path, "rb") as f:
-                data = f.read(2000000)
-
-            for pes_pos, stream_id in BluRayDetector._find_pes_packets(data):
-                ts_pos = BluRayDetector._find_ts_packet_for_pes(data, pes_pos)
-                if ts_pos is not None:
-                    pid = ((data[ts_pos + 1] & 0x1F) << 8) | data[ts_pos + 2]
-                    if pid not in pesid_map:
-                        pesid_map[f"0x{pid:04x}"] = f"0x{stream_id:02x}"
-        except Exception as e:
-            print(f"警告: 解析 M2TS PESID 失败: {e}")
-
-        return pesid_map
-
-    @staticmethod
     def _parse_clpi_streams(
         data: bytes, stream_type: int, lang_offset: int
     ) -> Tuple[int, Dict[int, str], Dict[int, str]]:
@@ -258,20 +222,6 @@ class BluRayDetector:
         return m2ts_names
 
     @staticmethod
-    def get_main_movie_file(directory: str) -> Optional[str]:
-        path = Path(directory)
-        stream_dir = path / Constants.BLURAY_PATHS["STREAM"]
-        if not stream_dir.exists():
-            return None
-
-        m2ts_files = list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
-        if not m2ts_files:
-            return None
-
-        m2ts_files.sort(key=lambda x: x.stat().st_size, reverse=True)
-        return str(m2ts_files[0])
-
-    @staticmethod
     def get_large_m2ts_files(directory: str, min_size_mb: int = None) -> List[Tuple[str, str]]:
         if min_size_mb is None:
             min_size_mb = Constants.MIN_BLURAY_FILE_SIZE_MB
@@ -280,7 +230,7 @@ class BluRayDetector:
         if not stream_dir.exists():
             return []
 
-        m2ts_files = list(stream_dir.glob("*.m2ts")) + list(stream_dir.glob("*.M2TS"))
+        m2ts_files = BluRayDetector.glob_m2ts(stream_dir)
         if not m2ts_files:
             return []
 
@@ -298,7 +248,7 @@ class BluRayDetector:
             return None
 
         target_name = m2ts_name.lower()
-        for mpls_file in list(playlist_dir.glob("*.mpls")) + list(playlist_dir.glob("*.MPLS")):
+        for mpls_file in BluRayDetector.glob_mpls(playlist_dir):
             m2ts_names = [name.lower() for name in BluRayDetector.parse_mpls_file(mpls_file)]
             if target_name in m2ts_names:
                 return mpls_file

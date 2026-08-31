@@ -29,7 +29,7 @@ def _collect_batch_inputs(input_dir: Path) -> List[str]:
             add_path(root_path)
             dirs[:] = []
             continue
-        if root_path.name == "BDMV" and root_path.parent.exists():
+        if root_path.name.upper() == "BDMV" and root_path.parent.exists():
             if detector.is_bluray_directory(str(root_path.parent)):
                 add_path(root_path.parent)
                 dirs[:] = []
@@ -46,7 +46,7 @@ def _collect_batch_inputs(input_dir: Path) -> List[str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="将视频转换为 AV1/HEVC + MKV 容器，并复制音轨/字幕 (使用 NVEncC)"
+        description="将视频转换为 AV1/HEVC + MKV 容器，并复制音轨/字幕（默认 NVEncC，可选 SVT-AV1）"
     )
     parser.add_argument(
         "input",
@@ -71,7 +71,12 @@ def main():
         default=None,
         help="NVEncC64 可执行文件路径(默认: 自动检测)",
     )
-    parser.add_argument("-q", "--qvbr", type=int, help="指定 QVBR 值 (默认：自动)")
+    parser.add_argument(
+        "-q",
+        "--qvbr",
+        type=int,
+        help="指定质量值（NVENC: QVBR；svt_av1: CRF。默认自动）",
+    )
     parser.add_argument(
         "-n", "--no-qp-max-limit",
         action="store_true",
@@ -89,6 +94,12 @@ def main():
         action="store_true",
         default=False,
         help="仅复制默认音轨和国语音轨",
+    )
+    parser.add_argument(
+        "--keep-grain",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="保留胶片颗粒与纹理（NVENC 关闭 UHQ 时域滤波；svt_av1 使用 VQ 且关闭颗粒合成。默认开启）",
     )
 
     args = parser.parse_args()
@@ -135,6 +146,7 @@ def main():
         args.enable_quality_eval,
         args.no_qp_max_limit,
         args.keep_default_zh_audio,
+        args.keep_grain,
     )
 
     GREEN = "\033[92m"

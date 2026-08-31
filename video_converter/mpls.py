@@ -1,6 +1,9 @@
 import struct
 
 
+# Blu-ray MPLS playlist binary parser used to extract clips, chapters, and stream languages.
+
+
 class MPLS:
     """
     todo ;

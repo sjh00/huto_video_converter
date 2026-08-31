@@ -9,27 +9,6 @@ from video_converter.presets import QualityPreset
 from video_converter.utils import Utils
 
 
-def _parse_fps(converter: VideoConverter, input_file: str) -> float:
-    data = converter.media_info._run_ffprobe(input_file)
-    if not data:
-        return 0.0
-    streams = data.get("streams", [])
-    video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
-    value = video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate", "")
-    return converter.media_info._parse_frame_rate(value)
-
-
-def _parse_duration_seconds(converter: VideoConverter, input_file: str) -> float:
-    data = converter.media_info._run_ffprobe(input_file)
-    if not data:
-        return 0.0
-    format_info = data.get("format", {})
-    try:
-        return float(format_info.get("duration") or 0.0)
-    except ValueError:
-        return 0.0
-
-
 def _build_metadata(
     converter: VideoConverter, input_file: str, source_video_info: Dict[str, object]
 ) -> Tuple[str, Dict[int, str], Dict[int, str]]:
@@ -37,7 +16,7 @@ def _build_metadata(
         converter._extract_bluray_metadata(Path(input_file))
     )
     if audio_langs and audio_pids:
-        mapped_langs = converter.media_info.map_audio_languages_by_pid(
+        mapped_langs = converter.media_info.map_languages_by_pid(
             audio_langs,
             audio_pids,
             source_video_info.get("audio_stream_pids"),
@@ -45,7 +24,7 @@ def _build_metadata(
         if mapped_langs:
             audio_langs = mapped_langs
     if subtitle_langs and subtitle_pids:
-        mapped_langs = converter.media_info.map_subtitle_languages_by_pid(
+        mapped_langs = converter.media_info.map_languages_by_pid(
             subtitle_langs,
             subtitle_pids,
             source_video_info.get("subtitle_stream_pids"),
@@ -293,12 +272,13 @@ def main():
 
     enable_quality_eval = not args.disable_quality_eval
     converter = VideoConverter(args.nvenc_path, enable_quality_eval)
-    fps = _parse_fps(converter, args.input)
+    source_video_info = converter.media_info.extract_source_video_info(args.input)
+    fps = float(source_video_info.get("fps") or 0.0)
     if fps <= 0:
         print("错误: 无法解析帧率")
         raise SystemExit(1)
 
-    duration_seconds = _parse_duration_seconds(converter, args.input)
+    duration_seconds = float(source_video_info.get("duration_seconds") or 0.0)
     if duration_seconds <= 0:
         print("错误: 无法解析时长")
         raise SystemExit(1)
@@ -313,10 +293,7 @@ def main():
 
     results: Dict[int, Dict[str, List[float]]] = {}
 
-    source_video_info = converter.media_info.extract_source_video_info(args.input)
-
     for gop_len in gop_values:
-        QualityPreset.encoder_params[args.encoder]["gop-len"] = gop_len
         results[gop_len] = {
             "time": [],
             "size": [],
@@ -350,6 +327,7 @@ def main():
                     audio_langs,
                     subtitle_langs,
                     source_video_info,
+                    gop_len=gop_len,
                 )
             except KeyboardInterrupt:
                 print("\n用户中断任务")

@@ -1,5 +1,7 @@
+import shutil
+import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from .constants import Constants
 
 
@@ -38,7 +40,7 @@ class Utils:
         return list(video_files)
 
     @staticmethod
-    def get_output_dir(output_dir: str = None) -> Path:
+    def get_output_dir(output_dir: Optional[str] = None) -> Path:
         if output_dir:
             return Path(output_dir)
         script_dir = Path(__file__).parent.parent
@@ -48,17 +50,11 @@ class Utils:
 
     @staticmethod
     def find_tool(tool_name: str) -> str:
-        # script_dir = Path(__file__).parent.parent
-        # thirdpart_dir = script_dir / "thirdpart"
-
-        # # Check for .exe extension on Windows
-        # candidates = [tool_name]
-        # if sys.platform.startswith("win") and not tool_name.lower().endswith(".exe"):
-        #     candidates.insert(0, f"{tool_name}.exe")
-
-        # for name in candidates:
-        #     tool_path = thirdpart_dir / name
-        #     if tool_path.exists():
-        #         return str(tool_path)
-
+        names = [tool_name]
+        if sys.platform.startswith("win") and not tool_name.lower().endswith(".exe"):
+            names.insert(0, f"{tool_name}.exe")
+        for name in names:
+            resolved = shutil.which(name)
+            if resolved:
+                return resolved
         return tool_name

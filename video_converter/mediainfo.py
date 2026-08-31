@@ -1,7 +1,6 @@
 import json
 import math
 import re
-import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -11,6 +10,9 @@ from .utils import Utils
 
 
 class MediaInfo:
+    def __init__(self):
+        self._probe_cache: Dict[Tuple[str, int, int, bool], Optional[Dict]] = {}
+
     def _nfo_codec_from_encoder(self, encoder: str) -> str:
         if "av1" in encoder:
             return "av1"
@@ -22,16 +24,22 @@ class MediaInfo:
 
     def _ffprobe_path(self) -> Optional[str]:
         candidate = Utils.find_tool("ffprobe")
-        if Path(candidate).exists():
-            return str(Path(candidate))
-        resolved = shutil.which(candidate)
-        if resolved:
-            return resolved
+        if candidate and Path(candidate).exists():
+            return candidate
         return None
 
     def _run_ffprobe(self, media_path: str, include_chapters: bool = False) -> Optional[Dict]:
+        path = Path(media_path)
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        cache_key = (str(path), stat.st_mtime_ns, stat.st_size, include_chapters)
+        if cache_key in self._probe_cache:
+            return self._probe_cache[cache_key]
         ffprobe_path = self._ffprobe_path()
         if not ffprobe_path:
+            self._probe_cache[cache_key] = None
             return None
         cmd = [
             ffprobe_path,
@@ -45,11 +53,14 @@ class MediaInfo:
         cmd.append(media_path)
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
         if result.returncode != 0:
+            self._probe_cache[cache_key] = None
             return None
         try:
-            return json.loads(result.stdout)
+            data = json.loads(result.stdout)
         except json.JSONDecodeError:
-            return None
+            data = None
+        self._probe_cache[cache_key] = data
+        return data
 
     def extract_duration_info(self, media_path: str) -> Dict[str, float]:
         data = self._run_ffprobe(media_path)
@@ -122,12 +133,10 @@ class MediaInfo:
                 duration_seconds = video_duration
         if nb_frames and str(nb_frames).isdigit():
             frame_count = int(nb_frames)
-        else:
-            if fps and duration_seconds:
-                frame_count = int(round(duration_seconds * fps))
-            elif fps and nb_frames and str(nb_frames).isdigit():
-                duration_seconds = int(nb_frames) / fps
-                frame_count = int(nb_frames)
+            if fps and not duration_seconds:
+                duration_seconds = frame_count / fps
+        elif fps and duration_seconds:
+            frame_count = int(round(duration_seconds * fps))
         bits = None
         for key in ("bits_per_raw_sample", "bits_per_sample"):
             value = video_stream.get(key)
@@ -157,6 +166,16 @@ class MediaInfo:
         elif "rgb" in pix_fmt or "gbr" in pix_fmt:
             output_csp = "rgb"
         is_4k = width >= 3840 or height >= 2160
+        color_primaries = video_stream.get("color_primaries") or None
+        color_transfer = video_stream.get("color_transfer") or None
+        color_space = video_stream.get("color_space") or None
+        color_range = video_stream.get("color_range") or None
+        if color_range:
+            color_range = str(color_range).lower()
+            if color_range in ("tv", "limited", "mpeg"):
+                color_range = "tv"
+            elif color_range in ("pc", "full", "jpeg"):
+                color_range = "pc"
         size_bytes = 0
         size_value = format_info.get("size")
         if size_value:
@@ -165,15 +184,43 @@ class MediaInfo:
             except ValueError:
                 size_bytes = 0
         bit_rate = 0
-        for key in ("bit_rate",):
-            value = format_info.get(key) or video_stream.get(key)
-            if value:
+        tags = video_stream.get("tags") or {}
+        for value in (
+            video_stream.get("bit_rate"),
+            tags.get("BPS"),
+            tags.get("BPS-eng"),
+            tags.get("bitrate"),
+        ):
+            if not value:
+                continue
+            try:
+                bit_rate = int(float(value))
+            except (TypeError, ValueError):
+                bit_rate = 0
+            if bit_rate > 0:
+                break
+        if not bit_rate:
+            bytes_value = tags.get("NUMBER_OF_BYTES") or tags.get("NUMBER_OF_BYTES-eng")
+            tag_duration = tags.get("DURATION") or tags.get("DURATION-eng")
+            duration_for_bps = duration_seconds
+            if tag_duration and ":" in str(tag_duration):
                 try:
-                    bit_rate = int(float(value))
-                except ValueError:
+                    parts = str(tag_duration).split(":")
+                    duration_for_bps = (
+                        float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                    )
+                except (TypeError, ValueError, IndexError):
+                    duration_for_bps = duration_seconds
+            if bytes_value and duration_for_bps > 0:
+                try:
+                    bit_rate = int(float(bytes_value) * 8 / duration_for_bps)
+                except (TypeError, ValueError):
                     bit_rate = 0
-                if bit_rate:
-                    break
+        if not bit_rate:
+            try:
+                bit_rate = int(float(format_info.get("bit_rate") or 0))
+            except (TypeError, ValueError):
+                bit_rate = 0
         if not bit_rate and size_bytes and duration_seconds:
             bit_rate = int((size_bytes * 8) / duration_seconds)
         return {
@@ -188,6 +235,10 @@ class MediaInfo:
             "duration_seconds": duration_seconds,
             "bit_rate": bit_rate,
             "size_bytes": size_bytes,
+            "color_primaries": color_primaries,
+            "color_transfer": color_transfer,
+            "color_space": color_space,
+            "color_range": color_range,
         }
 
     def extract_audio_tracks(self, input_file: str) -> List[Dict[str, object]]:
@@ -213,45 +264,23 @@ class MediaInfo:
             audio_index += 1
         return tracks
 
-    def map_audio_languages_by_pid(
+    def map_languages_by_pid(
         self,
-        audio_langs: Optional[Dict[int, str]],
-        audio_pids: Optional[Dict[int, str]],
-        audio_stream_pids: Optional[List[str]],
+        langs: Optional[Dict[int, str]],
+        pids: Optional[Dict[int, str]],
+        stream_pids: Optional[List[str]],
     ) -> Dict[int, str]:
-        if not audio_langs or not audio_pids or not audio_stream_pids:
+        if not langs or not pids or not stream_pids:
             return {}
         pid_to_lang = {}
-        for idx, lang in audio_langs.items():
-            pid = audio_pids.get(idx)
+        for idx, lang in langs.items():
+            pid = pids.get(idx)
             if pid and lang:
                 pid_to_lang[pid] = lang
         if not pid_to_lang:
             return {}
         mapped = {}
-        for track_index, pid in enumerate(audio_stream_pids):
-            lang = pid_to_lang.get(pid)
-            if lang:
-                mapped[track_index] = lang
-        return mapped
-
-    def map_subtitle_languages_by_pid(
-        self,
-        subtitle_langs: Optional[Dict[int, str]],
-        subtitle_pids: Optional[Dict[int, str]],
-        subtitle_stream_pids: Optional[List[str]],
-    ) -> Dict[int, str]:
-        if not subtitle_langs or not subtitle_pids or not subtitle_stream_pids:
-            return {}
-        pid_to_lang = {}
-        for idx, lang in subtitle_langs.items():
-            pid = subtitle_pids.get(idx)
-            if pid and lang:
-                pid_to_lang[pid] = lang
-        if not pid_to_lang:
-            return {}
-        mapped = {}
-        for track_index, pid in enumerate(subtitle_stream_pids):
+        for track_index, pid in enumerate(stream_pids):
             lang = pid_to_lang.get(pid)
             if lang:
                 mapped[track_index] = lang
@@ -303,11 +332,10 @@ class MediaInfo:
             return "PGSSUB"
         return codec_name.upper()
 
-    def _build_nfo_xml(self, data: Dict, encoder: str) -> str:
+    def _build_fileinfo_element(self, data: Dict, encoder: str) -> ET.Element:
         streams = data.get("streams", [])
         format_info = data.get("format", {})
-        root = ET.Element("movie")
-        fileinfo = ET.SubElement(root, "fileinfo")
+        fileinfo = ET.Element("fileinfo")
         streamdetails = ET.SubElement(fileinfo, "streamdetails")
         video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
         video = ET.SubElement(streamdetails, "video")
@@ -356,18 +384,93 @@ class MediaInfo:
             ET.SubElement(subtitle, "language").text = stream.get("tags", {}).get("language", "")
             ET.SubElement(subtitle, "default").text = self._bool_text(int(stream.get("disposition", {}).get("default", 0)))
             ET.SubElement(subtitle, "forced").text = self._bool_text(int(stream.get("disposition", {}).get("forced", 0)))
-        tree = ET.ElementTree(root)
-        ET.indent(tree, space="  ")
-        return ET.tostring(root, encoding="unicode")
+        return fileinfo
 
-    def write_nfo(self, output_file: str, encoder: str) -> bool:
+    def _serialize_element(self, element: ET.Element) -> str:
+        tree = ET.ElementTree(element)
+        ET.indent(tree, space="  ")
+        return ET.tostring(element, encoding="unicode")
+
+    def _build_nfo_xml(self, data: Dict, encoder: str) -> str:
+        root = ET.Element("movie")
+        root.append(self._build_fileinfo_element(data, encoder))
+        return self._serialize_element(root)
+
+    def find_sidecar_nfo(self, media_path: str) -> Optional[Path]:
+        path = Path(media_path)
+        for suffix in (".nfo", ".NFO"):
+            candidate = path.with_suffix(suffix)
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _indent_xml_block(self, xml_text: str, indent: str) -> str:
+        lines = xml_text.splitlines()
+        if not lines:
+            return xml_text
+        indented = [lines[0]]
+        for line in lines[1:]:
+            indented.append(f"{indent}{line}" if line else line)
+        return "\n".join(indented)
+
+    def _apply_fileinfo_to_nfo_text(self, nfo_text: str, fileinfo_xml: str) -> str:
+        pattern = re.compile(r"<fileinfo\b[^>]*>.*?</fileinfo>", re.DOTALL | re.IGNORECASE)
+        match = pattern.search(nfo_text)
+        if match:
+            line_start = nfo_text.rfind("\n", 0, match.start()) + 1
+            indent = nfo_text[line_start:match.start()]
+            if indent.strip():
+                indent = "  "
+            replacement = self._indent_xml_block(fileinfo_xml, indent)
+            return nfo_text[:match.start()] + replacement + nfo_text[match.end():]
+        close_match = re.search(
+            r"(\r?\n)?([ \t]*)</([A-Za-z0-9:_\-]+)>\s*$",
+            nfo_text,
+        )
+        if not close_match:
+            raise ValueError("源NFO缺少fileinfo且无法定位根节点")
+        indent = close_match.group(2) + "  "
+        insertion = self._indent_xml_block(fileinfo_xml, indent)
+        newline = close_match.group(1) or "\n"
+        return nfo_text[:close_match.start()] + newline + indent + insertion + nfo_text[close_match.start():]
+
+    def _reuse_nfo_with_fileinfo(self, source_nfo: Path, fileinfo: ET.Element) -> Tuple[str, str]:
+        raw = source_nfo.read_bytes()
+        has_bom = raw.startswith(b"\xef\xbb\xbf")
+        text = raw.decode("utf-8-sig")
+        if not text.strip():
+            raise ValueError("源NFO为空")
+        xml_text = self._apply_fileinfo_to_nfo_text(text, self._serialize_element(fileinfo))
+        encoding = "utf-8-sig" if has_bom else "utf-8"
+        return xml_text, encoding
+
+    def write_nfo(
+        self,
+        output_file: str,
+        encoder: str,
+        input_file: Optional[str] = None,
+    ) -> bool:
+        if not Path(output_file).is_file():
+            return False
         data = self._run_ffprobe(output_file)
         if not data:
             print("错误: 无法获取媒体信息，未生成NFO")
             return False
+        nfo_path = Path(output_file).with_suffix(".nfo")
+        source_nfo = self.find_sidecar_nfo(input_file) if input_file else None
+        if source_nfo:
+            try:
+                xml_text, encoding = self._reuse_nfo_with_fileinfo(
+                    source_nfo,
+                    self._build_fileinfo_element(data, encoder),
+                )
+                nfo_path.write_text(xml_text, encoding=encoding)
+                print(f"已复用源NFO并更新fileinfo: {nfo_path}")
+                return True
+            except (OSError, UnicodeError, ValueError, ET.ParseError) as exc:
+                print(f"警告: 复用源NFO失败，改为生成新NFO: {exc}")
         xml_text = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
         xml_text += self._build_nfo_xml(data, encoder)
-        nfo_path = Path(output_file).with_suffix(".nfo")
         nfo_path.write_text(xml_text, encoding="utf-8")
         print(f"已生成NFO: {nfo_path}")
         return True
