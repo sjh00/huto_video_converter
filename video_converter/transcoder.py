@@ -9,6 +9,7 @@ from typing import List, Dict, Tuple, Optional
 from .utils import Utils
 from .presets import QualityPreset
 from .constants import Constants
+from .tools import stop_process
 
 
 class NVEncTranscoder:
@@ -158,6 +159,8 @@ class NVEncTranscoder:
         output_csp: Optional[str] = None,
         is_4k: bool = False,
         vmaf_subsample: int = 1,
+        copy_subtitles: bool = False,
+        input_file: str = "",
     ) -> List[str]:
         codec = "av1"
         if "hevc" in encoder.lower():
@@ -184,10 +187,14 @@ class NVEncTranscoder:
         # Track preservation (Maximum retention)
         nvenc_opts_dict.update({
             "audio-copy": None,
-            "sub-copy": None,
             "data-copy": None,
             "attachment-copy": None,
         })
+        if copy_subtitles:
+            nvenc_opts_dict["sub-copy"] = None
+        suffix = Path(input_file).suffix.lower() if input_file else ""
+        if suffix in {".m2ts", ".ts", ".m2t"}:
+            nvenc_opts_dict.setdefault("input-analyze", 60)
         if audio_track_ids:
             nvenc_opts_dict["audio-copy"] = ",".join(str(idx) for idx in audio_track_ids)
 
@@ -212,15 +219,16 @@ class NVEncTranscoder:
         else:
             metadata_opts.extend(["--audio-metadata", "copy"])
 
-        if subtitle_langs:
-            for idx in sorted(subtitle_langs.keys()):
-                lang = subtitle_langs.get(idx)
-                if not lang:
-                    continue
-                track_id = idx + 1
-                metadata_opts.extend(["--sub-metadata", f"{track_id}?language={lang}"])
-        else:
-            metadata_opts.extend(["--sub-metadata", "copy"])
+        if copy_subtitles:
+            if subtitle_langs:
+                for idx in sorted(subtitle_langs.keys()):
+                    lang = subtitle_langs.get(idx)
+                    if not lang:
+                        continue
+                    track_id = idx + 1
+                    metadata_opts.extend(["--sub-metadata", f"{track_id}?language={lang}"])
+            else:
+                metadata_opts.extend(["--sub-metadata", "copy"])
 
         # Quality Evaluation
         if self.enable_quality_eval:
@@ -243,6 +251,97 @@ class NVEncTranscoder:
                 nvenc_opts.append(str(v))
         nvenc_opts.extend(metadata_opts)
         return nvenc_opts
+
+    def _mux_subtitles(
+        self,
+        encoded_file: str,
+        source_file: str,
+        output_file: str,
+        subtitle_langs: Optional[Dict[int, str]] = None,
+    ) -> str:
+        temp_output = str(Path(output_file).with_name(Path(output_file).stem + "._subs.mkv"))
+        cmd = [
+            Utils.find_tool("ffmpeg"),
+            "-y",
+            "-hide_banner",
+            "-i",
+            encoded_file,
+            "-fflags",
+            "+genpts",
+            "-analyzeduration",
+            "100M",
+            "-probesize",
+            "100M",
+            "-i",
+            source_file,
+            "-map",
+            "0",
+            "-map",
+            "1:s?",
+            "-c",
+            "copy",
+            "-max_interleave_delta",
+            "0",
+            "-map_metadata",
+            "0",
+            "-map_chapters",
+            "0",
+        ]
+        if subtitle_langs:
+            for idx in sorted(subtitle_langs.keys()):
+                lang = subtitle_langs.get(idx)
+                if lang:
+                    cmd.extend(["-metadata:s:s:" + str(idx), f"language={lang}"])
+        cmd.append(temp_output)
+        print("并行转码完成，正在用 ffmpeg 补入字幕...")
+        returncode, full_output, aborted = self._run_nvenc_process(cmd, stream=False)
+        if aborted:
+            Path(temp_output).unlink(missing_ok=True)
+            Path(output_file).unlink(missing_ok=True)
+            return "aborted"
+        if returncode != 0 or not Path(temp_output).exists():
+            Path(temp_output).unlink(missing_ok=True)
+            err = (full_output or "").strip().splitlines()
+            tail = "\n".join(err[-12:])
+            print(f"警告: 字幕封装失败，保留无字幕成片\n{tail}")
+            return "fail"
+        Path(output_file).unlink(missing_ok=True)
+        Path(temp_output).replace(output_file)
+        print("已补入源片字幕")
+        return "ok"
+
+    def _run_nvenc_process(
+        self, cmd: List[str], stream: bool = True
+    ) -> Tuple[int, str, bool]:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+            text=False,
+        )
+        output_chunks: List[bytes] = []
+        try:
+            if stream:
+                while True:
+                    chunk = process.stdout.read(1024)
+                    if chunk == b"":
+                        if process.poll() is not None:
+                            break
+                        continue
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                    output_chunks.append(chunk)
+            else:
+                stdout, _ = process.communicate()
+                if stdout:
+                    output_chunks.append(stdout)
+        except KeyboardInterrupt:
+            stop_process(process)
+            return -1, "", True
+        process.wait()
+        full_output = b"".join(output_chunks).decode("utf-8", errors="ignore")
+        return process.returncode, full_output, False
 
     def _build_nvenc_cmd(self, input_file: str, output_file: str, nvenc_opts: List[str]) -> Tuple[List[str], str]:
         cmd = [self.nvenc_path, "--avhw"] + nvenc_opts + ["-i", input_file, "-o", output_file]
@@ -517,35 +616,6 @@ class NVEncTranscoder:
         cmd_print = " ".join(f'"{p}"' if " " in str(p) else str(p) for p in cmd)
         return cmd, cmd_print, extras_to_delete
 
-    def _run_process(self, cmd: List[str]) -> Tuple[int, str, bool]:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,
-            text=False,
-        )
-        output_chunks: List[bytes] = []
-        try:
-            while True:
-                chunk = process.stdout.read(1024)
-                if chunk == b"":
-                    if process.poll() is not None:
-                        break
-                    continue
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-                output_chunks.append(chunk)
-        except KeyboardInterrupt:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-            return -1, "", True
-        process.wait()
-        full_output = b"".join(output_chunks).decode("utf-8", errors="ignore")
-        return process.returncode, full_output, False
-
     def _transcode_svt(
         self,
         input_file: str,
@@ -558,7 +628,7 @@ class NVEncTranscoder:
         crf: Optional[int],
         audio_track_ids: Optional[List[int]],
         gop_len: Optional[int],
-    ) -> Dict[str, any]:
+    ) -> Dict[str, object]:
         if crf is None:
             crf = 16 if self.keep_grain else 26
         cmd, cmd_print, extras = self._build_svt_cmd(
@@ -576,7 +646,7 @@ class NVEncTranscoder:
         print(f"\n开始转码: {Path(input_file).name} (SVT-AV1 CRF={crf})")
         encode_start_time = time.time()
         try:
-            returncode, full_output, aborted = self._run_process(cmd)
+            returncode, full_output, aborted = self._run_nvenc_process(cmd)
         finally:
             if chapter_file:
                 Path(chapter_file).unlink(missing_ok=True)
@@ -584,6 +654,7 @@ class NVEncTranscoder:
                 Path(extra).unlink(missing_ok=True)
         encode_end_time = time.time()
         if aborted:
+            Path(output_file).unlink(missing_ok=True)
             return {"success": False, "aborted": True}
         success = returncode == 0 and Path(output_file).exists()
         metrics: Dict[str, float] = {}
@@ -642,7 +713,7 @@ class NVEncTranscoder:
         qvbr: Optional[int] = None,
         audio_track_ids: Optional[List[int]] = None,
         gop_len: Optional[int] = None,
-    ) -> Dict[str, any]:
+    ) -> Dict[str, object]:
         source_video_info = source_video_info or {}
         if Constants.is_svt_encoder(encoder):
             return self._transcode_svt(
@@ -678,6 +749,10 @@ class NVEncTranscoder:
                 params["gop-len"] = math.ceil(fps * 4)
             else:
                 params["gop-len"] = 96
+        is_mpegts = Path(input_file).suffix.lower() in {".m2ts", ".ts", ".m2t"}
+        has_subtitles = bool(subtitle_langs) or bool(
+            source_video_info.get("subtitle_stream_pids")
+        ) or is_mpegts
         nvenc_opts = self._get_nvenc_options(
             params,
             encoder=encoder,
@@ -689,49 +764,35 @@ class NVEncTranscoder:
             output_csp=source_video_info.get("output_csp"),
             is_4k=bool(source_video_info.get("is_4k")),
             vmaf_subsample=source_video_info.get("vmaf_subsample", 1),
+            copy_subtitles=False,
+            input_file=input_file,
         )
 
+        encode_start_time = time.time()
         cmd, cmd_print = self._build_nvenc_cmd(input_file, output_file, nvenc_opts)
         print(f"\n命令: {cmd_print}")
         print(f"\n开始转码: {Path(input_file).name}")
-
-        encode_start_time = time.time()
-
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,
-            text=False,
-        )
-
-        output_chunks: List[bytes] = []
-
-        try:
-            while True:
-                chunk = process.stdout.read(1024)
-                if chunk == b"":
-                    if process.poll() is not None:
-                        break
-                    continue
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-                output_chunks.append(chunk)
-        except KeyboardInterrupt:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-            return {"success": False, "aborted": True}
-        finally:
+        returncode, full_output, aborted = self._run_nvenc_process(cmd)
+        if aborted:
             if chapter_file:
                 Path(chapter_file).unlink(missing_ok=True)
+            Path(output_file).unlink(missing_ok=True)
+            return {"success": False, "aborted": True}
 
-        process.wait()
+        success = self._check_nvenc_success(returncode, full_output, output_file)
+        if success and has_subtitles:
+            mux_status = self._mux_subtitles(
+                output_file, input_file, output_file, subtitle_langs
+            )
+            if mux_status == "aborted":
+                if chapter_file:
+                    Path(chapter_file).unlink(missing_ok=True)
+                return {"success": False, "aborted": True}
+
+        if chapter_file:
+            Path(chapter_file).unlink(missing_ok=True)
+
         encode_end_time = time.time()
-
-        full_output = b"".join(output_chunks).decode("utf-8", errors="ignore")
-        success = self._check_nvenc_success(process.returncode, full_output, output_file)
         metrics = self._extract_quality_metrics(full_output)
 
         result = {

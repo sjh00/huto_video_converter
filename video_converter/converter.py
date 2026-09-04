@@ -1,14 +1,20 @@
-import sys
+import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .utils import Utils
 from .bluray import BluRayDetector
 from .transcoder import NVEncTranscoder
 from .mediainfo import MediaInfo
 from .constants import Constants
+from .tools import stop_process
+
+
+class ConversionAborted(Exception):
+    pass
 
 
 class VideoConverter:
@@ -19,6 +25,7 @@ class VideoConverter:
         no_qp_max_limit: bool = False,
         keep_default_zh_audio: bool = False,
         keep_grain: bool = True,
+        min_bluray_size_mb: float = Constants.MIN_BLURAY_FILE_SIZE_MB,
     ):
         self.detector = BluRayDetector()
         self.transcoder = NVEncTranscoder(
@@ -30,11 +37,17 @@ class VideoConverter:
         self.media_info = MediaInfo()
         self.skip_count = 0
         self.skipped_files: List[str] = []
+        self.succeeded_files: List[Dict[str, object]] = []
+        self.failed_files: List[str] = []
+        self.copied_on_skip: List[str] = []
+        self.filtered_small_files: List[Dict[str, object]] = []
+        self._last_sample_metrics: Optional[Dict[str, float]] = None
         self.always_skip_existing = False
         self.in_series_batch = False
         self.no_qp_max_limit = no_qp_max_limit
         self.keep_default_zh_audio = keep_default_zh_audio
         self.keep_grain = keep_grain
+        self.min_bluray_size_mb = min_bluray_size_mb
 
     def _temp_dir(self) -> Path:
         temp_dir = Path(__file__).parent.parent / "temp"
@@ -51,8 +64,20 @@ class VideoConverter:
             *args,
             str(output_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-        if result.returncode != 0 or not output_path.exists():
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        try:
+            process.communicate()
+        except KeyboardInterrupt:
+            stop_process(process)
+            output_path.unlink(missing_ok=True)
+            raise
+        if process.returncode != 0 or not output_path.exists():
             output_path.unlink(missing_ok=True)
             return False
         return True
@@ -66,15 +91,182 @@ class VideoConverter:
             and format_duration / video_duration >= 1.05
         )
 
-    def _record_skip(self, input_file: str, output_file: str, encoder: str) -> None:
+    def _record_skip(
+        self,
+        input_file: str,
+        output_file: str,
+        encoder: str,
+        write_nfo: bool = True,
+        copied: bool = False,
+    ) -> None:
         self.skip_count += 1
         self.skipped_files.append(input_file)
-        if Path(output_file).is_file():
+        if copied:
+            self.copied_on_skip.append(input_file)
+        if write_nfo and Path(output_file).is_file():
             self.media_info.write_nfo(output_file, encoder, input_file)
 
-    def _abort_conversion(self, input_file: str) -> None:
+    def _record_success(self, input_file: str, stats: Optional[Dict[str, object]] = None) -> None:
+        item: Dict[str, object] = {"path": input_file}
+        if stats:
+            item.update(stats)
+        self.succeeded_files.append(item)
+
+    def _record_fail(self, input_file: str) -> None:
+        self.failed_files.append(input_file)
+
+    def _copy_source_to_output(self, input_file: str, output_file: str) -> bool:
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"跳过转码，复制到输出: {output_path.name}")
+        ok = self._run_ffmpeg(
+            ["-i", input_file, "-map", "0", "-c", "copy"],
+            output_path,
+        )
+        if not ok:
+            print(f"错误: 复制失败: {input_file}")
+        return ok
+
+    def _copy_sidecar_nfo(
+        self,
+        input_file: str,
+        output_file: str,
+        source_nfo: Optional[str] = None,
+        nfo_output_path: Optional[str] = None,
+    ) -> None:
+        src: Optional[Path] = None
+        if source_nfo:
+            candidate = Path(source_nfo)
+            if candidate.is_file():
+                src = candidate
+        if src is None:
+            src = self.media_info.find_sidecar_nfo(input_file)
+        if src is None:
+            return
+        dest = (
+            Path(nfo_output_path)
+            if nfo_output_path
+            else Path(output_file).with_suffix(src.suffix)
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if src.resolve() == dest.resolve():
+                return
+            shutil.copy2(src, dest)
+            print(f"已复制 NFO: {dest.name}")
+        except OSError as exc:
+            print(f"警告: 复制 NFO 失败: {exc}")
+
+    def _copy_and_record_skip(
+        self,
+        input_file: str,
+        output_file: str,
+        encoder: str,
+        source_nfo: Optional[str] = None,
+        nfo_output_path: Optional[str] = None,
+    ) -> bool:
+        if not self._copy_source_to_output(input_file, output_file):
+            self._record_fail(input_file)
+            return False
+        self._copy_sidecar_nfo(
+            input_file, output_file, source_nfo, nfo_output_path
+        )
+        self._record_skip(
+            input_file, output_file, encoder, write_nfo=False, copied=True
+        )
+        return True
+
+    def _copy_already_skipped(
+        self,
+        input_file: str,
+        output_file: str,
+        source_nfo: Optional[str] = None,
+        nfo_output_path: Optional[str] = None,
+    ) -> bool:
+        if not self._copy_source_to_output(input_file, output_file):
+            return False
+        self._copy_sidecar_nfo(
+            input_file, output_file, source_nfo, nfo_output_path
+        )
+        if input_file not in self.copied_on_skip:
+            self.copied_on_skip.append(input_file)
+        return True
+
+    @staticmethod
+    def _format_mb(size_bytes: int) -> str:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+    def _output_is_complete(
+        self, source_video_info: Dict[str, object], output_file: str
+    ) -> bool:
+        source_duration = float(source_video_info.get("duration_seconds") or 0)
+        if source_duration <= 30:
+            return True
+        info = self.media_info.extract_duration_info(output_file)
+        output_duration = float(info.get("video_duration") or info.get("format_duration") or 0)
+        if output_duration <= 0:
+            return False
+        return output_duration >= source_duration * 0.9
+
+    def _collect_encode_stats(
+        self,
+        source_video_info: Dict[str, object],
+        output_file: str,
+        quality: Optional[Dict[str, object]],
+    ) -> Dict[str, object]:
+        quality = quality or {}
+        duration_seconds = float(source_video_info.get("duration_seconds") or 0)
+        source_bps = self.transcoder._calculate_bitrate(
+            float(source_video_info.get("bit_rate") or 0),
+            float(source_video_info.get("size_bytes") or 0),
+            duration_seconds,
+            "",
+        )
+        encoded_kbps = quality.get("encoded_kbps")
+        output_bps = int(float(encoded_kbps) * 1000) if encoded_kbps else 0
+        if output_bps <= 0 and duration_seconds > 0:
+            output_bps = self.transcoder._calculate_bitrate(0, 0, duration_seconds, output_file)
+        ratio = (output_bps / source_bps) if source_bps > 0 and output_bps > 0 else None
+        sample = self._last_sample_metrics or {}
+        vmaf = quality.get("vmaf")
+        if vmaf is None:
+            vmaf = sample.get("vmaf")
+        ssimu2 = quality.get("ssimu2")
+        if ssimu2 is None:
+            ssimu2 = sample.get("ssimu2")
+        stats: Dict[str, object] = {"ratio": ratio, "vmaf": vmaf, "ssimu2": ssimu2}
+        if quality.get("quality_value") is not None:
+            stats["quality"] = quality.get("quality_value")
+        if quality.get("encoder"):
+            stats["encoder"] = quality.get("encoder")
+        if "color_ok" in quality:
+            stats["color_ok"] = quality.get("color_ok")
+        if quality.get("color_warnings"):
+            stats["color_warnings"] = quality.get("color_warnings")
+        return stats
+
+    def _delete_incomplete_output(self, output_file: Optional[str]) -> None:
+        if not output_file:
+            return
+        output_path = Path(output_file)
+        extras = [
+            output_path,
+            output_path.with_suffix(".nfo"),
+            output_path.with_name(output_path.stem + "._subs.mkv"),
+        ]
+        for path in extras:
+            if path.is_file():
+                path.unlink(missing_ok=True)
+                print(f"已删除不完整输出: {path.name}")
+
+    def _abort_conversion(
+        self, input_file: str, output_file: Optional[str] = None
+    ) -> None:
         print(f"转换已中止: {input_file}")
-        sys.exit(0)
+        self._delete_incomplete_output(output_file)
+        if input_file not in self.failed_files:
+            self._record_fail(input_file)
+        raise ConversionAborted()
 
     def _select_audio_track_ids(self, input_file: str) -> Optional[List[int]]:
         if not self.keep_default_zh_audio:
@@ -211,34 +403,37 @@ class VideoConverter:
 
         handle_choice = self._handle_existing_output(output_file)
         if handle_choice == "abort":
-            self._abort_conversion(input_file)
+            print(f"转换已中止: {input_file}")
+            raise SystemExit(0)
         elif handle_choice == "skip":
             print(f"已跳过: {input_file}")
             if created_clip and test_input != input_file:
                 Path(test_input).unlink(missing_ok=True)
             return True
 
-        result = self.transcoder.transcode(
-            test_input,
-            output_file,
-            encoder,
-            "",
-            None,
-            None,
-            source_video_info,
-            qvbr,
-            audio_track_ids,
-        )
-
-        if created_clip and test_input != input_file:
-            Path(test_input).unlink(missing_ok=True)
+        try:
+            result = self.transcoder.transcode(
+                test_input,
+                output_file,
+                encoder,
+                "",
+                None,
+                None,
+                source_video_info,
+                qvbr,
+                audio_track_ids,
+            )
+        except KeyboardInterrupt:
+            self._abort_conversion(input_file, output_file)
+        finally:
+            if created_clip and test_input != input_file:
+                Path(test_input).unlink(missing_ok=True)
 
         success = result.get("success", False)
         if success:
             print(f"测试完成: {output_file}")
         elif result.get("aborted", False):
-            print(f"转换已中止: {input_file}")
-            sys.exit(0)
+            self._abort_conversion(input_file, output_file)
         else:
             print(f"测试失败: {input_file}")
         return success
@@ -252,6 +447,7 @@ class VideoConverter:
         duration_seconds = float(source_video_info.get("duration_seconds") or 0)
         source_kbps = self._get_source_bitrate_kbps(source_video_info)
         quality_name = Constants.quality_label(encoder)
+        self._last_sample_metrics = None
         if duration_seconds <= 0:
             print(f"错误: 无法解析源视频时长，{quality_name} 自动取值失败")
             return None, "fail"
@@ -264,23 +460,20 @@ class VideoConverter:
             self.keep_grain,
         )
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        if self.keep_grain:
-            target_vmaf = 94.0
-            lowest_vmaf = 88.0
-            target_ssimu2 = 92.0
-            lowest_ssimu2 = 85.0
-            low, high = (12, 25) if Constants.is_svt_encoder(encoder) else (18, 36)
-        else:
-            target_vmaf = 96.0
-            lowest_vmaf = 90.0
-            target_ssimu2 = 85.0
-            lowest_ssimu2 = 75.0
-            low, high = (18, 32) if Constants.is_svt_encoder(encoder) else (25, 45)
-        best_over_candidate = None
-        best_over_metrics = None
-        best_under_candidate = None
-        best_under_metrics = None
-        tested_ok = False
+        qcfg = Constants.quality_search(self.keep_grain, encoder)
+        target_ssimu2 = qcfg["target_ssimu2"]
+        lowest_ssimu2 = qcfg["lowest_ssimu2"]
+        target_vmaf = qcfg["target_vmaf"]
+        lowest_vmaf = qcfg["lowest_vmaf"]
+        size_limit = qcfg["size_limit"]
+        low, high = qcfg["low"], qcfg["high"]
+        tested: List[Tuple[int, Dict[str, float]]] = []
+        grain_label = "保颗粒" if self.keep_grain else "不保颗粒"
+        print(
+            f"质量门槛（{grain_label}）: 目标 VMAF {target_vmaf:.1f} / SSIMU2 {target_ssimu2:.1f}，"
+            f"最低 VMAF {lowest_vmaf:.1f} / SSIMU2 {lowest_ssimu2:.1f}，"
+            f"体积 ≤{int(size_limit * 100)}%"
+        )
 
         def has_qp_issue(i_avg_qp: Optional[float]) -> bool:
             return (
@@ -314,8 +507,7 @@ class VideoConverter:
         def is_smaller_than_source(encoded_kbps: Optional[float]) -> bool:
             if encoded_kbps is None or source_kbps <= 0:
                 return False
-            limit = 0.85 if self.keep_grain else 0.80
-            return encoded_kbps < source_kbps * limit
+            return encoded_kbps < source_kbps * size_limit
 
         def _quality_gap(metrics: Dict[str, float]) -> float:
             vmaf = float(metrics.get("vmaf") or 0.0)
@@ -363,55 +555,89 @@ class VideoConverter:
                 if metrics is None:
                     low = mid + 1
                     continue
-                tested_ok = True
+                tested.append((mid, metrics))
                 if meets_target_quality(metrics):
-                    best_over_candidate = mid
-                    best_over_metrics = metrics
                     low = mid + 1
                     continue
-                if meets_lowest_quality(metrics):
-                    if best_under_metrics is None or _quality_gap(metrics) < _quality_gap(
-                        best_under_metrics
-                    ) or (
-                        _quality_gap(metrics) == _quality_gap(best_under_metrics)
-                        and mid > best_under_candidate
-                    ):
-                        best_under_candidate = mid
-                        best_under_metrics = metrics
                 high = mid - 1
         finally:
             if created_clip and test_input != input_file:
                 Path(test_input).unlink(missing_ok=True)
 
-        if best_over_metrics is not None and is_smaller_than_source(
-            best_over_metrics.get("encoded_kbps")
-        ):
+        shrinking_target = [
+            (candidate, metrics)
+            for candidate, metrics in tested
+            if meets_target_quality(metrics)
+            and is_smaller_than_source(metrics.get("encoded_kbps"))
+        ]
+        shrinking_lowest = [
+            (candidate, metrics)
+            for candidate, metrics in tested
+            if meets_lowest_quality(metrics)
+            and is_smaller_than_source(metrics.get("encoded_kbps"))
+        ]
+        oversized_target = [
+            (candidate, metrics)
+            for candidate, metrics in tested
+            if meets_target_quality(metrics)
+            and not is_smaller_than_source(metrics.get("encoded_kbps"))
+        ]
+
+        if shrinking_target:
+            candidate, metrics = max(shrinking_target, key=lambda item: item[0])
+            self._last_sample_metrics = metrics
             print(
-                f"自动选择 {quality_name}={best_over_candidate}，{_format_metrics(best_over_metrics)}，"
-                f"达到目标；视频码率 {best_over_metrics['encoded_kbps']:.0f}/{source_kbps:.0f} kbps"
+                f"自动选择 {quality_name}={candidate}，{_format_metrics(metrics)}，"
+                f"达到目标；视频码率 {metrics['encoded_kbps']:.0f}/{source_kbps:.0f} kbps"
             )
-            return best_over_candidate, "encode"
-        if best_under_metrics is not None and is_smaller_than_source(
-            best_under_metrics.get("encoded_kbps")
-        ):
+            return candidate, "encode"
+        if shrinking_lowest:
+            candidate, metrics = min(
+                shrinking_lowest,
+                key=lambda item: (_quality_gap(item[1]), -item[0]),
+            )
+            self._last_sample_metrics = metrics
             print(
-                f"自动选择 {quality_name}={best_under_candidate}，{_format_metrics(best_under_metrics)}，"
+                f"自动选择 {quality_name}={candidate}，{_format_metrics(metrics)}，"
                 f"未达到目标但可压缩；视频码率 "
-                f"{best_under_metrics['encoded_kbps']:.0f}/{source_kbps:.0f} kbps"
+                f"{metrics['encoded_kbps']:.0f}/{source_kbps:.0f} kbps"
             )
-            return best_under_candidate, "encode"
-        if not tested_ok:
+            return candidate, "encode"
+        if not tested:
             print(f"错误: {quality_name} 试编码失败，无法判断是否需要转码")
             return None, "fail"
         if source_kbps > 0:
+            limit_pct = int(size_limit * 100)
             print(
                 f"源视频码率 {source_kbps:.0f} kbps，在可接受画质下无法再明显压缩，跳过转码"
             )
+            if oversized_target:
+                candidate, metrics = min(
+                    oversized_target, key=lambda item: item[1]["encoded_kbps"]
+                )
+                print(
+                    f"  达到目标的 {quality_name}={candidate} 为 "
+                    f"{metrics['encoded_kbps']:.0f} kbps，未低于源码率 {limit_pct}%"
+                )
             return None, "skip"
-        if best_over_candidate is not None:
-            return best_over_candidate, "encode"
-        if best_under_candidate is not None:
-            return best_under_candidate, "encode"
+        target_any = [
+            (candidate, metrics)
+            for candidate, metrics in tested
+            if meets_target_quality(metrics)
+        ]
+        lowest_any = [
+            (candidate, metrics)
+            for candidate, metrics in tested
+            if meets_lowest_quality(metrics)
+        ]
+        if target_any:
+            candidate, _ = max(target_any, key=lambda item: item[0])
+            return candidate, "encode"
+        if lowest_any:
+            candidate, _ = min(
+                lowest_any, key=lambda item: (_quality_gap(item[1]), -item[0])
+            )
+            return candidate, "encode"
         return None, "skip"
 
     def _handle_existing_output(self, output_file: str) -> str:
@@ -583,12 +809,18 @@ class VideoConverter:
         encoder: str = "av1_nvenc",
         qvbr: Optional[int] = None,
         skip_existing_check: bool = False,
-    ) -> bool:
+        write_nfo: bool = True,
+        source_nfo: Optional[str] = None,
+        nfo_output_path: Optional[str] = None,
+        copy_on_skip: bool = False,
+    ) -> str:
         input_path = Path(input_file)
+        self._last_sample_metrics = None
 
         if not input_path.exists():
             print(f"错误: 输入文件不存在: {input_file}")
-            return False
+            self._record_fail(input_file)
+            return "fail"
 
         if output_file is None:
             output_file = self._get_default_output_file(input_file)
@@ -599,11 +831,12 @@ class VideoConverter:
         if not skip_existing_check:
             handle_choice = self._handle_existing_output(output_file)
             if handle_choice == "abort":
-                self._abort_conversion(input_file)
+                print(f"转换已中止: {input_file}")
+                raise SystemExit(0)
             elif handle_choice == "skip":
                 print(f"已跳过: {input_file}")
-                self._record_skip(input_file, output_file, encoder)
-                return True
+                self._record_skip(input_file, output_file, encoder, write_nfo=write_nfo)
+                return "exists"
 
         clean_input, cleaned = input_file, False
         trimmed_input, trimmed = input_file, False
@@ -644,12 +877,22 @@ class VideoConverter:
                 )
                 if qvbr_status == "fail":
                     print(f"转换失败: {input_file}")
-                    return False
+                    self._record_fail(input_file)
+                    return "fail"
                 if qvbr_status == "skip":
                     print(f"\033[93m该视频无需转码: {input_file}\033[0m")
-                    self.skip_count += 1
-                    self.skipped_files.append(input_file)
-                    return True
+                    if copy_on_skip:
+                        if not self._copy_and_record_skip(
+                            input_file,
+                            output_file,
+                            encoder,
+                            source_nfo=source_nfo,
+                            nfo_output_path=nfo_output_path,
+                        ):
+                            return "fail"
+                        return "skip"
+                    self._record_skip(input_file, output_file, encoder, write_nfo=False)
+                    return "skip"
                 if selected_qvbr is not None:
                     qvbr = selected_qvbr
 
@@ -667,15 +910,50 @@ class VideoConverter:
 
             success = result.get("success", False)
 
-            if success:
-                print(f"转换完成: {output_file}")
-                self._auto_fix_output_duration(output_file)
-                self.media_info.write_nfo(output_file, encoder, input_file)
-            elif result.get("aborted", False):
-                self._abort_conversion(input_file)
-            else:
+            if result.get("aborted", False):
+                self._abort_conversion(input_file, output_file)
+            if not success:
                 print(f"转换失败: {input_file}")
-            return success
+                self._delete_incomplete_output(output_file)
+                self._record_fail(input_file)
+                return "fail"
+            if not self._output_is_complete(source_video_info, output_file):
+                print(
+                    f"\033[91m输出不完整，判定失败: {Path(output_file).name}\033[0m"
+                )
+                self._delete_incomplete_output(output_file)
+                self._record_fail(input_file)
+                return "fail"
+            print(f"转换完成: {output_file}")
+            self._auto_fix_output_duration(output_file)
+            color_warnings = self.media_info.compare_color_metadata(
+                source_video_info, output_file
+            )
+            if color_warnings:
+                for warning in color_warnings:
+                    print(f"\033[93m警告: 色彩元数据 {warning}\033[0m")
+            if write_nfo:
+                self.media_info.write_nfo(
+                    output_file,
+                    encoder,
+                    input_file,
+                    nfo_path=nfo_output_path,
+                    source_nfo=source_nfo,
+                )
+            quality = dict(result.get("quality") or {})
+            quality["quality_value"] = qvbr
+            quality["encoder"] = encoder
+            quality["color_ok"] = not color_warnings
+            quality["color_warnings"] = color_warnings
+            self._record_success(
+                input_file,
+                self._collect_encode_stats(
+                    source_video_info, output_file, quality
+                ),
+            )
+            return "encode"
+        except KeyboardInterrupt:
+            self._abort_conversion(input_file, output_file)
         finally:
             for temp_path, created in (
                 (clean_input, cleaned),
@@ -683,6 +961,130 @@ class VideoConverter:
             ):
                 if created and temp_path != input_file:
                     Path(temp_path).unlink(missing_ok=True)
+
+    def _convert_bluray_jobs(
+        self,
+        jobs: List[Tuple[str, str, int]],
+        output_path: Path,
+        encoder: str,
+        qvbr: Optional[int],
+        bluray_root: Path,
+    ) -> bool:
+        jobs = sorted(jobs, key=lambda item: item[2], reverse=True)
+        folder_nfo = self.media_info.find_directory_nfo(str(bluray_root))
+        encode_n = 0
+        skip_n = 0
+        fail_n = 0
+        total = len(jobs)
+
+        def count_status(status: str) -> None:
+            nonlocal encode_n, skip_n, fail_n
+            if status == "encode":
+                encode_n += 1
+            elif status in ("skip", "exists"):
+                skip_n += 1
+            else:
+                fail_n += 1
+
+        main_file, main_name, _ = jobs[0]
+        if folder_nfo:
+            main_output = str(output_path / f"{folder_nfo.stem}.mkv")
+            main_source_nfo = str(folder_nfo)
+            main_nfo_output = str(output_path / folder_nfo.name)
+        else:
+            main_output = str(output_path / f"{Path(main_name).stem}.mkv")
+            main_source_nfo = None
+            main_nfo_output = None
+        print(f"主视频: {main_name}（目录内体积最大）")
+        print(f"[1/{total}] 正在转换 {main_name}")
+        status = self.convert_file(
+            main_file,
+            main_output,
+            encoder,
+            qvbr,
+            write_nfo=True,
+            source_nfo=main_source_nfo,
+            nfo_output_path=main_nfo_output,
+            copy_on_skip=False,
+        )
+        count_status(status)
+        if status == "fail":
+            print("主视频转换失败，整盘失败，停止处理其余文件")
+            print(f"\n完成: 成功 {encode_n}，跳过 {skip_n}，失败 {fail_n}，共 {total} 个文件")
+            return False
+        if status == "skip":
+            print("主视频无需转码，整盘跳过")
+            for extra_file, extra_name, _ in jobs[1:]:
+                extra_output = str(output_path / f"{Path(extra_name).stem}.mkv")
+                self._record_skip(extra_file, extra_output, encoder, write_nfo=False)
+                skip_n += 1
+            print(f"\n完成: 成功 {encode_n}，跳过 {skip_n}，失败 {fail_n}，共 {total} 个文件")
+            return True
+
+        extras_write_nfo = folder_nfo is None
+        for idx, (m2ts_file, m2ts_name, _) in enumerate(jobs[1:], 2):
+            output_file = str(output_path / f"{Path(m2ts_name).stem}.mkv")
+            print(f"[{idx}/{total}] 正在转换 {m2ts_name}")
+            status = self.convert_file(
+                m2ts_file,
+                output_file,
+                encoder,
+                qvbr,
+                write_nfo=extras_write_nfo,
+                copy_on_skip=True,
+            )
+            count_status(status)
+
+        print(f"\n完成: 成功 {encode_n}，跳过 {skip_n}，失败 {fail_n}，共 {total} 个文件")
+        return fail_n == 0
+
+    def _filter_small_bluray_jobs(
+        self,
+        jobs: List[Tuple[str, str, int]],
+        stream_dir: Path,
+    ) -> List[Tuple[str, str, int]]:
+        threshold_mb = self.min_bluray_size_mb
+        if threshold_mb <= 0:
+            return jobs
+        threshold_bytes = threshold_mb * 1024 * 1024
+        kept: List[Tuple[str, str, int]] = []
+        seen_names = set()
+        before = len(self.filtered_small_files)
+
+        def record_filtered(path: str, name: str, size: int) -> None:
+            self.filtered_small_files.append(
+                {"path": path, "name": name, "size": size}
+            )
+
+        for m2ts_file, m2ts_name, size in jobs:
+            seen_names.add(m2ts_name.lower())
+            if size < threshold_bytes:
+                record_filtered(m2ts_file, m2ts_name, size)
+            else:
+                kept.append((m2ts_file, m2ts_name, size))
+
+        if stream_dir.exists():
+            for m2ts_path in self.detector.glob_m2ts(stream_dir):
+                name = m2ts_path.name
+                if name.lower() in seen_names:
+                    continue
+                seen_names.add(name.lower())
+                size = m2ts_path.stat().st_size
+                if size < threshold_bytes:
+                    record_filtered(str(m2ts_path), name, size)
+
+        added = self.filtered_small_files[before:]
+        if added:
+            print(
+                f"过滤 {len(added)} 个小于 {threshold_mb:g} MB 的片段"
+                f"（通常为片头 logo、声明等，等于 {threshold_mb:g} MB 的仍会处理）"
+            )
+            print(f"\n过滤列表（小于 {threshold_mb:g} MB）:")
+            for item in added:
+                print(
+                    f"- {item['name']}  {self._format_mb(int(item['size']))}"
+                )
+        return kept
 
     def _process_bluray_directory(
         self,
@@ -734,7 +1136,7 @@ class VideoConverter:
 
             max_duration = max(info["duration"] for info in playlist_infos)
             min_duration = 15.0
-            min_size_mb = 40.0
+            min_size_mb = self.min_bluray_size_mb
             long_duration = 600.0
 
             candidates = []
@@ -743,6 +1145,9 @@ class VideoConverter:
                 size_mb = info["size_mb"]
                 chapter_count = info["chapter_count"]
                 relative_ok = max_duration > 0 and duration >= max_duration * 0.15
+                if min_size_mb <= 0:
+                    candidates.append(info)
+                    continue
                 if duration < min_duration:
                     continue
                 if not (
@@ -766,55 +1171,47 @@ class VideoConverter:
                     input_name = bluray_root.name or datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_path = Utils.get_output_dir(output_dir) / input_name
                     output_path.mkdir(parents=True, exist_ok=True)
-
-                    success_count = 0
-                    for idx, info in enumerate(single_clip_candidates, 1):
+                    jobs = []
+                    for info in single_clip_candidates:
                         m2ts_name = info["clip_names"][0]
-                        m2ts_file = str(stream_dir / m2ts_name)
-                        m2ts_stem = Path(m2ts_name).stem
-                        output_file = str(output_path / f"{m2ts_stem}.mkv")
-
-                        print(
-                            f"[{idx}/{len(single_clip_candidates)}] 正在转换 {m2ts_name}"
+                        m2ts_path = stream_dir / m2ts_name
+                        jobs.append(
+                            (str(m2ts_path), m2ts_name, m2ts_path.stat().st_size)
                         )
-
-                        if self.convert_file(m2ts_file, output_file, encoder, qvbr):
-                            success_count += 1
-
-                    print(
-                        f"\n完成: 成功 {success_count}/{len(single_clip_candidates)} 个文件"
+                    jobs = self._filter_small_bluray_jobs(jobs, stream_dir)
+                    if not jobs:
+                        print("所有 STREAM 片段均小于体积阈值，已全部过滤")
+                        return True
+                    return self._convert_bluray_jobs(
+                        jobs, output_path, encoder, qvbr, bluray_root
                     )
-                    return success_count == len(single_clip_candidates)
                 print("警告: 未找到可直接处理的单片段播放列表，回退到按文件大小筛选")
             else:
                 print("警告: 未找到符合条件的播放列表，回退到按文件大小筛选")
         else:
             print("警告: 未找到可用播放列表，回退到按文件大小筛选")
 
-        large_m2ts_files = self.detector.get_large_m2ts_files(directory)
-
-        if not large_m2ts_files:
-            print("错误: 蓝光目录中未找到有价值的 M2TS 文件")
+        m2ts_files = self.detector.glob_m2ts(stream_dir)
+        if not m2ts_files:
+            print("错误: 蓝光目录中未找到 M2TS 文件")
+            self._record_fail(directory)
             return False
-
-        print(f"发现 {len(large_m2ts_files)} 个有价值的 M2TS 文件，开始转换")
 
         input_name = bluray_root.name or datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = Utils.get_output_dir(output_dir) / input_name
         output_path.mkdir(parents=True, exist_ok=True)
 
-        success_count = 0
-        for idx, (m2ts_file, m2ts_name) in enumerate(large_m2ts_files, 1):
-            m2ts_stem = Path(m2ts_name).stem
-            output_file = str(output_path / f"{m2ts_stem}.mkv")
+        jobs = [
+            (str(m2ts_path), m2ts_path.name, m2ts_path.stat().st_size)
+            for m2ts_path in m2ts_files
+        ]
+        jobs = self._filter_small_bluray_jobs(jobs, stream_dir)
+        if not jobs:
+            print("所有 STREAM 片段均小于体积阈值，已全部过滤")
+            return True
 
-            print(f"[{idx}/{len(large_m2ts_files)}] 正在转换 {m2ts_name}")
-
-            if self.convert_file(m2ts_file, output_file, encoder, qvbr):
-                success_count += 1
-
-        print(f"\n完成: 成功 {success_count}/{len(large_m2ts_files)} 个文件")
-        return success_count == len(large_m2ts_files)
+        print(f"发现 {len(jobs)} 个达到体积阈值的 M2TS 文件，开始转换")
+        return self._convert_bluray_jobs(jobs, output_path, encoder, qvbr, bluray_root)
 
     def _process_single_video_directory(
         self,
@@ -829,6 +1226,7 @@ class VideoConverter:
 
         if len(video_files) > 1:
             print("错误: 目录下包含多个视频文件，仅支持单影片转换")
+            self._record_fail(directory)
             return False
         elif len(video_files) == 1:
             input_file = str(video_files[0])
@@ -838,45 +1236,93 @@ class VideoConverter:
 
             output_file = str(output_path / f"{input_name}.mkv")
 
-            return self.convert_file(input_file, output_file, encoder, qvbr)
+            return self.convert_file(input_file, output_file, encoder, qvbr) != "fail"
         else:
             print("错误: 目录中未找到视频文件")
+            self._record_fail(directory)
             return False
 
-    def _skip_season_video(
-        self,
-        video_file: Path,
-        output_file: str,
-        encoder: str,
-        label: str,
-        total_count: int,
-    ) -> None:
-        print(f"[{total_count}] 已跳过 {label}")
-        self._record_skip(str(video_file), output_file, encoder)
-
-    def _convert_season_videos(
+    def _process_video_group(
         self,
         videos: List[Path],
-        season_dir: Path,
-        season_output: Path,
+        output_dir: Path,
         encoder: str,
         qvbr: Optional[int],
+        group_name: str,
         success_count: int,
         total_count: int,
-        skip_existing_check: bool = False,
     ) -> Tuple[int, int]:
+        consecutive_skips = 0
+        encoded = False
+        pending_copies: List[Tuple[str, str]] = []
+        skip_limit = Constants.SEASON_CONSECUTIVE_SKIP
+        remaining_after_cutoff: List[Path] = []
+
         for idx, video_file in enumerate(videos):
             total_count += 1
-            output_file = str(season_output / f"{video_file.stem}.mkv")
-            print(f"[{total_count}] 正在转换 {season_dir.name}\\{video_file.name}")
-            if self.convert_file(
+            output_file = str(output_dir / f"{video_file.stem}.mkv")
+            print(f"[{total_count}] 正在转换 {group_name}\\{video_file.name}")
+            status = self.convert_file(
                 str(video_file),
                 output_file,
                 encoder,
                 qvbr,
-                skip_existing_check and idx == 0,
-            ):
+                copy_on_skip=False,
+            )
+            if status == "encode":
+                encoded = True
+                consecutive_skips = 0
                 success_count += 1
+            elif status == "skip":
+                consecutive_skips += 1
+                pending_copies.append((str(video_file), output_file))
+                success_count += 1
+                if consecutive_skips >= skip_limit:
+                    remaining_after_cutoff = videos[idx + 1 :]
+                    break
+            elif status == "exists":
+                consecutive_skips = 0
+                success_count += 1
+            else:
+                consecutive_skips = 0
+
+        if remaining_after_cutoff:
+            if encoded:
+                print(
+                    f"\033[93m{group_name} 连续 {skip_limit} 个无需转码，"
+                    f"其余按跳过处理，季末复制\033[0m"
+                )
+                for video_file in remaining_after_cutoff:
+                    total_count += 1
+                    output_file = str(output_dir / f"{video_file.stem}.mkv")
+                    print(f"[{total_count}] 跳过 {group_name}\\{video_file.name}")
+                    self._record_skip(
+                        str(video_file), output_file, encoder, write_nfo=False
+                    )
+                    pending_copies.append((str(video_file), output_file))
+                    success_count += 1
+            else:
+                print(
+                    f"\033[93m{group_name} 连续 {skip_limit} 个无需转码，"
+                    f"判定该季无需转码，整季跳过（不复制）\033[0m"
+                )
+                pending_copies = []
+                for video_file in remaining_after_cutoff:
+                    total_count += 1
+                    output_file = str(output_dir / f"{video_file.stem}.mkv")
+                    print(f"[{total_count}] 跳过 {group_name}\\{video_file.name}")
+                    self._record_skip(
+                        str(video_file), output_file, encoder, write_nfo=False
+                    )
+                    success_count += 1
+
+        if encoded and pending_copies:
+            print(
+                f"{group_name} 本季有转码，复制 {len(pending_copies)} 个无需转码的文件"
+            )
+            for input_file, output_file in pending_copies:
+                if not self._copy_already_skipped(input_file, output_file):
+                    print(f"错误: 复制失败: {input_file}")
         return success_count, total_count
 
     def _process_season(
@@ -889,72 +1335,14 @@ class VideoConverter:
         success_count: int,
         total_count: int,
     ) -> Tuple[int, int]:
-        season_qvbr = qvbr
-        start_index = 0
-        skip_existing_for_first = False
-        if season_qvbr is None:
-            test_video = None
-            for idx, video_file in enumerate(season_videos):
-                output_file = str(season_output / f"{video_file.stem}.mkv")
-                handle_choice = self._handle_existing_output(output_file)
-                if handle_choice == "abort":
-                    self._abort_conversion(str(video_file))
-                if handle_choice == "skip":
-                    total_count += 1
-                    self._skip_season_video(
-                        video_file,
-                        output_file,
-                        encoder,
-                        f"{season_dir.name}\\{video_file.name}",
-                        total_count,
-                    )
-                    success_count += 1
-                    continue
-                test_video = video_file
-                start_index = idx
-                break
-            if test_video is None:
-                return success_count, total_count
-            source_video_info = self.media_info.extract_source_video_info(str(test_video))
-            selected_qvbr, qvbr_status = self._auto_select_qvbr(
-                str(test_video), encoder, source_video_info
-            )
-            if qvbr_status == "fail":
-                print(
-                    f"\033[91m{season_dir.name} 自动选择 {Constants.quality_label(encoder)} 失败，跳过该季\033[0m"
-                )
-                for video_file in season_videos[start_index:]:
-                    total_count += 1
-                    print(
-                        f"[{total_count}] 失败 {season_dir.name}\\{video_file.name}"
-                    )
-                return success_count, total_count
-            if qvbr_status == "skip":
-                print(f"\033[93m{season_dir.name} 无需转码: 自动跳过该季\033[0m")
-                for video_file in season_videos[start_index:]:
-                    total_count += 1
-                    output_file = str(season_output / f"{video_file.stem}.mkv")
-                    self._skip_season_video(
-                        video_file,
-                        output_file,
-                        encoder,
-                        f"{season_dir.name}\\{video_file.name}",
-                        total_count,
-                    )
-                    success_count += 1
-                return success_count, total_count
-            if selected_qvbr is not None:
-                season_qvbr = selected_qvbr
-            skip_existing_for_first = True
-        return self._convert_season_videos(
-            season_videos[start_index:],
-            season_dir,
+        return self._process_video_group(
+            season_videos,
             season_output,
             encoder,
-            season_qvbr,
+            qvbr,
+            season_dir.name,
             success_count,
             total_count,
-            skip_existing_for_first,
         )
 
     def _process_tv_series_directory(
@@ -983,6 +1371,7 @@ class VideoConverter:
                 output_root.mkdir(parents=True, exist_ok=True)
                 success_count = 0
                 total_count = 0
+                fail_before = len(self.failed_files)
                 for season_dir, season_videos in season_entries:
                     season_output = output_root / season_dir.name
                     season_output.mkdir(parents=True, exist_ok=True)
@@ -996,23 +1385,27 @@ class VideoConverter:
                         total_count,
                     )
                 print(f"\n完成: 成功 {success_count}/{total_count} 个文件")
-                return success_count == total_count
+                return len(self.failed_files) == fail_before
 
             video_files = Utils.get_video_files(dir_path)
             if not video_files:
                 print("错误: 目录中未找到视频文件")
+                self._record_fail(directory)
                 return False
 
             output_path = Utils.get_output_dir(output_dir) / dir_path.name
             output_path.mkdir(parents=True, exist_ok=True)
-            success_count = 0
-            for idx, video_file in enumerate(sorted(video_files), 1):
-                output_file = str(output_path / f"{video_file.stem}.mkv")
-                print(f"[{idx}/{len(video_files)}] 正在转换 {video_file.name}")
-                if self.convert_file(str(video_file), output_file, encoder, qvbr):
-                    success_count += 1
-            print(f"\n完成: 成功 {success_count}/{len(video_files)} 个文件")
-            return success_count == len(video_files)
+            success_count, total_count = self._process_video_group(
+                sorted(video_files),
+                output_path,
+                encoder,
+                qvbr,
+                dir_path.name,
+                0,
+                0,
+            )
+            print(f"\n完成: 成功 {success_count}/{total_count} 个文件")
+            return success_count == total_count
         finally:
             self.in_series_batch = False
 
@@ -1048,6 +1441,7 @@ class VideoConverter:
 
         if not dir_path.exists() or not dir_path.is_dir():
             print(f"错误: 目录不存在: {directory}")
+            self._record_fail(directory)
             return False
         if dir_path.name.upper() == "BDMV" and dir_path.parent.exists():
             if self.detector.is_bluray_directory(str(dir_path.parent)):
@@ -1064,6 +1458,77 @@ class VideoConverter:
         else:
             return self._process_single_video_directory(directory, output_dir, encoder, qvbr)
 
+    def write_convert_result(self, output_dir: str, encoder: str) -> Path:
+        result_dir = Path(output_dir)
+        result_dir.mkdir(parents=True, exist_ok=True)
+        qcfg = Constants.quality_search(self.keep_grain, encoder)
+        clips: List[Dict[str, object]] = []
+        copied = set(self.copied_on_skip)
+        for item in self.succeeded_files:
+            clip: Dict[str, object] = {
+                "path": item.get("path"),
+                "status": "success",
+            }
+            for key in (
+                "ratio",
+                "vmaf",
+                "ssimu2",
+                "quality",
+                "encoder",
+                "color_ok",
+                "color_warnings",
+            ):
+                if key in item:
+                    clip[key] = item[key]
+            clips.append(clip)
+        for path in self.skipped_files:
+            clips.append(
+                {
+                    "path": path,
+                    "status": "skip",
+                    "copied": path in copied,
+                }
+            )
+        for item in self.filtered_small_files:
+            clips.append(
+                {
+                    "path": item.get("path"),
+                    "status": "filtered_small",
+                    "size": item.get("size"),
+                    "min_bluray_size_mb": self.min_bluray_size_mb,
+                }
+            )
+        for path in self.failed_files:
+            clips.append({"path": path, "status": "fail"})
+        payload = {
+            "schema_version": 1,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "encoder": encoder,
+            "keep_grain": self.keep_grain,
+            "min_bluray_size_mb": self.min_bluray_size_mb,
+            "quality_search": {
+                "target_vmaf": qcfg["target_vmaf"],
+                "lowest_vmaf": qcfg["lowest_vmaf"],
+                "target_ssimu2": qcfg["target_ssimu2"],
+                "lowest_ssimu2": qcfg["lowest_ssimu2"],
+                "size_limit": qcfg["size_limit"],
+            },
+            "clips": clips,
+            "summary": {
+                "success": len(self.succeeded_files),
+                "skip": self.skip_count,
+                "filtered_small": len(self.filtered_small_files),
+                "fail": len(self.failed_files),
+            },
+        }
+        result_path = result_dir / "convert_result.json"
+        result_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"已写入结果: {result_path}")
+        return result_path
+
     def convert(
         self,
         input_path: str,
@@ -1075,12 +1540,14 @@ class VideoConverter:
 
         if not path.exists():
             print(f"错误: 路径不存在: {input_path}")
+            self._record_fail(input_path)
             return False
 
         if Utils.is_iso_file(input_path):
             print(
                 "ISO 文件：请先挂载镜像后指定光驱目录，按蓝光目录结构处理，或直接指定具体视频文件"
             )
+            self._record_fail(input_path)
             return False
 
         elif path.is_file():
@@ -1090,10 +1557,11 @@ class VideoConverter:
                 if output_path and Path(output_path).suffix:
                     output_dir = str(Path(output_path).parent)
                 output_file = self._resolve_bluray_output_file(path, output_dir)
-                return self.convert_file(input_path, output_file, encoder, qvbr)
-            return self.convert_file(input_path, output_path, encoder, qvbr)
+                return self.convert_file(input_path, output_file, encoder, qvbr) != "fail"
+            return self.convert_file(input_path, output_path, encoder, qvbr) != "fail"
         elif path.is_dir():
             return self.convert_directory(input_path, output_path, encoder, qvbr)
         else:
             print(f"错误: 路径不存在: {input_path}")
+            self._record_fail(input_path)
             return False

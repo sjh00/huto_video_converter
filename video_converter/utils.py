@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -30,6 +31,24 @@ class Utils:
         if bitrate > 0:
             return f"{bitrate / 1000000:.2f} Mbps"
         return "Unknown"
+
+    @staticmethod
+    def display_path(full_path: str, roots: Optional[List[str]] = None) -> str:
+        full_n = os.path.normpath(full_path)
+        best = None
+        for root in roots or []:
+            root_n = os.path.normpath(root)
+            full_l = os.path.normcase(full_n)
+            root_l = os.path.normcase(root_n)
+            if full_l == root_l:
+                candidate = os.path.basename(root_n)
+            elif full_l.startswith(root_l.rstrip("\\/") + os.sep):
+                candidate = full_n[len(root_n):].lstrip("\\/")
+            else:
+                continue
+            if best is None or len(candidate) < len(best):
+                best = candidate
+        return best or os.path.basename(full_n)
 
     @staticmethod
     def get_video_files(directory: Path) -> List[Path]:

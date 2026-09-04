@@ -6,10 +6,11 @@ import argparse
 import os
 from pathlib import Path
 from typing import List
-from video_converter.converter import VideoConverter
+from video_converter.converter import ConversionAborted, VideoConverter
 from video_converter.bluray import BluRayDetector
 from video_converter.constants import Constants
 from video_converter.utils import Utils
+from video_converter.tools import ExternalToolError, SIGINT_EXIT_CODE, require_tools
 
 
 def _collect_batch_inputs(input_dir: Path) -> List[str]:
@@ -64,7 +65,7 @@ def main():
         "-v", "--enable-quality-eval",
         action="store_true",
         default=False,
-        help="转换时启用 VMAF/SSIM/PSNR 质量评估 (NVEncC 内置)",
+        help="转换时启用质量评估（VMAF / SSIMU2 / SSIM / PSNR）",
     )
     parser.add_argument(
         "-p", "--nvenc-path",
@@ -101,13 +102,30 @@ def main():
         default=True,
         help="保留胶片颗粒与纹理（NVENC 关闭 UHQ 时域滤波；svt_av1 使用 VQ 且关闭颗粒合成。默认开启）",
     )
+    parser.add_argument(
+        "--min-bluray-size",
+        type=float,
+        default=Constants.MIN_BLURAY_FILE_SIZE_MB,
+        metavar="MB",
+        help=(
+            "蓝光 STREAM 片段小于该体积（MB）则跳过不处理，"
+            f"默认 {Constants.MIN_BLURAY_FILE_SIZE_MB}。"
+            "等于该体积的片段仍会处理。设为 0 则不按体积跳过。"
+        ),
+    )
 
     args = parser.parse_args()
 
-    # Auto-detect tools if not provided
-    args.nvenc_path = args.nvenc_path or Utils.find_tool("NVEncC64")
+    try:
+        args.nvenc_path = require_tools(args.nvenc_path, args.encoder)
+    except ExternalToolError as exc:
+        print(f"错误: {exc}")
+        sys.exit(exc.exit_code)
     if args.qvbr is not None and args.qvbr <= 0:
         print("错误: qvbr 必须为正整数")
+        sys.exit(1)
+    if args.min_bluray_size < 0:
+        print("错误: --min-bluray-size 不能为负数")
         sys.exit(1)
 
     if not args.input or args.input == ["input"]:
@@ -147,6 +165,7 @@ def main():
         args.no_qp_max_limit,
         args.keep_default_zh_audio,
         args.keep_grain,
+        args.min_bluray_size,
     )
 
     GREEN = "\033[92m"
@@ -154,77 +173,119 @@ def main():
     YELLOW = "\033[93m"
     RESET = "\033[0m"
 
+    def result_dir() -> Path:
+        if args.output:
+            output_path = Path(args.output)
+            if output_path.suffix and (len(args.input) == 1 or args.test):
+                parent = output_path.parent
+                return parent if str(parent) else Path(".")
+            return output_path
+        return Utils.get_output_dir()
+
+    def write_result() -> None:
+        if args.test:
+            return
+        converter.write_convert_result(str(result_dir()), args.encoder)
+
     if args.test:
-        success = converter.test_encode(
-            str(Path(args.input[0])),
-            args.output,
-            args.encoder,
-            args.qvbr,
-        )
+        try:
+            success = converter.test_encode(
+                str(Path(args.input[0])),
+                args.output,
+                args.encoder,
+                args.qvbr,
+            )
+        except (ConversionAborted, KeyboardInterrupt):
+            sys.exit(SIGINT_EXIT_CODE)
         sys.exit(0 if success else 1)
 
     total = len(args.input)
-    success_count = 0
-    fail_count = 0
-    failed_files = []
-    for idx, input_path in enumerate(args.input, 1):
-        if not Path(input_path).exists():
-            print(f"错误: 未找到输入: {input_path}")
-            fail_count += 1
-            failed_files.append(input_path)
-            continue
+    specified_inputs = list(args.input)
 
-        print(f"\n{'=' * 70}")
-        print(f"[{idx}/{total}] 正在转换: {Path(input_path).name}")
-        print(f"{'=' * 70}")
+    def rel(path: str) -> str:
+        return Utils.display_path(path, specified_inputs)
 
-        success = converter.convert(
-            input_path,
-            args.output,
-            args.encoder,
-            args.qvbr,
-        )
+    def format_success(item: dict) -> str:
+        line = f"- {rel(str(item['path']))}"
+        ratio = item.get("ratio")
+        if ratio is not None:
+            line += f"  压缩比 {float(ratio) * 100:.1f}%"
+        vmaf = item.get("vmaf")
+        if vmaf is not None:
+            line += f"  VMAF={float(vmaf):.2f}"
+        ssimu2 = item.get("ssimu2")
+        if ssimu2 is not None:
+            line += f"  SSIMU2={float(ssimu2):.2f}"
+        return line
 
-        if success:
-            print(f"\n{GREEN}转换完成!{RESET}")
-            success_count += 1
-        else:
-            print(f"\n{RED}转换失败!{RESET}")
-            fail_count += 1
-            failed_files.append(input_path)
+    aborted = False
+    try:
+        for idx, input_path in enumerate(args.input, 1):
+            if not Path(input_path).exists():
+                print(f"错误: 未找到输入: {input_path}")
+                converter._record_fail(input_path)
+                continue
+
+            print(f"\n{'=' * 70}")
+            print(f"[{idx}/{total}] 正在转换: {Path(input_path).name}")
+            print(f"{'=' * 70}")
+
+            fail_before = len(converter.failed_files)
+            converter.convert(
+                input_path,
+                args.output,
+                args.encoder,
+                args.qvbr,
+            )
+            new_fails = len(converter.failed_files) - fail_before
+            if new_fails == 0:
+                print(f"\n{GREEN}转换完成!{RESET}")
+            else:
+                print(f"\n{RED}有文件转换失败{RESET}")
+    except (ConversionAborted, KeyboardInterrupt):
+        aborted = True
 
     if total > 0:
+        success_items = converter.succeeded_files
         skip_count = converter.skip_count
         skipped_files = converter.skipped_files
-        if fail_count == 0:
-            if skip_count > 0:
-                print(
-                    f"\n{GREEN}汇总: {success_count}/{total} 成功{RESET}, "
-                    f"{YELLOW}{skip_count} 跳过{RESET}"
-                )
-            else:
-                print(f"\n{GREEN}汇总: {success_count}/{total} 成功{RESET}")
-        else:
-            if skip_count > 0:
-                print(
-                    f"\n汇总: {success_count}/{total} 成功, "
-                    f"{YELLOW}{skip_count} 跳过{RESET}, "
-                    f"{YELLOW}{fail_count} 失败{RESET}"
-                )
-            else:
-                print(
-                    f"\n汇总: {success_count}/{total} 成功, {YELLOW}{fail_count} 失败{RESET}"
-                )
+        filtered_small = converter.filtered_small_files
+        failed_files = converter.failed_files
+        success_count = len(success_items)
+        fail_count = len(failed_files)
+        copied = set(converter.copied_on_skip)
+        parts = [f"{GREEN}{success_count} 成功{RESET}"]
+        if skip_count > 0:
+            parts.append(f"{YELLOW}{skip_count} 跳过{RESET}")
+        if filtered_small:
+            parts.append(f"{YELLOW}{len(filtered_small)} 过滤{RESET}")
+        if fail_count > 0:
+            parts.append(f"{RED}{fail_count} 失败{RESET}")
+        print(f"\n汇总: {', '.join(parts)}")
+        if success_items:
+            print(f"\n{GREEN}成功列表:{RESET}")
+            for item in success_items:
+                print(format_success(item))
         if skipped_files:
             print(f"\n{YELLOW}跳过列表:{RESET}")
             for item in skipped_files:
-                print(f"- {item}")
+                extra = "  (已复制)" if item in copied else ""
+                print(f"- {rel(item)}{extra}")
+        if filtered_small:
+            threshold = converter.min_bluray_size_mb
+            print(f"\n{YELLOW}过滤列表（小于 {threshold:g} MB）:{RESET}")
+            for item in filtered_small:
+                size_text = VideoConverter._format_mb(int(item.get("size") or 0))
+                print(f"- {rel(str(item['path']))}  {size_text}")
         if failed_files:
             print(f"\n{RED}失败列表:{RESET}")
             for item in failed_files:
-                print(f"- {item}")
+                print(f"- {rel(item)}")
 
-    if fail_count > 0:
+    write_result()
+    if aborted:
+        sys.exit(SIGINT_EXIT_CODE)
+    if converter.failed_files:
         sys.exit(1)
 
 

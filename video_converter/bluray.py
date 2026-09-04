@@ -222,10 +222,12 @@ class BluRayDetector:
         return m2ts_names
 
     @staticmethod
-    def get_large_m2ts_files(directory: str, min_size_mb: int = None) -> List[Tuple[str, str]]:
+    def get_large_m2ts_files(
+        directory: Optional[str], min_size_mb: Optional[float] = None
+    ) -> List[Tuple[str, str]]:
         if min_size_mb is None:
             min_size_mb = Constants.MIN_BLURAY_FILE_SIZE_MB
-        path = Path(directory)
+        path = Path(directory) if directory else Path.cwd()
         stream_dir = path / Constants.BLURAY_PATHS["STREAM"]
         if not stream_dir.exists():
             return []
@@ -234,8 +236,15 @@ class BluRayDetector:
         if not m2ts_files:
             return []
 
-        min_size_bytes = min_size_mb * 1024 * 1024
-        large_files = [(str(f), f.name) for f in m2ts_files if f.stat().st_size >= min_size_bytes]
+        if min_size_mb <= 0:
+            large_files = [(str(f), f.name) for f in m2ts_files]
+        else:
+            min_size_bytes = min_size_mb * 1024 * 1024
+            large_files = [
+                (str(f), f.name)
+                for f in m2ts_files
+                if f.stat().st_size >= min_size_bytes
+            ]
         large_files.sort(key=lambda x: Path(x[0]).stat().st_size, reverse=True)
         return large_files
 

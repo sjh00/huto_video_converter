@@ -166,16 +166,7 @@ class MediaInfo:
         elif "rgb" in pix_fmt or "gbr" in pix_fmt:
             output_csp = "rgb"
         is_4k = width >= 3840 or height >= 2160
-        color_primaries = video_stream.get("color_primaries") or None
-        color_transfer = video_stream.get("color_transfer") or None
-        color_space = video_stream.get("color_space") or None
-        color_range = video_stream.get("color_range") or None
-        if color_range:
-            color_range = str(color_range).lower()
-            if color_range in ("tv", "limited", "mpeg"):
-                color_range = "tv"
-            elif color_range in ("pc", "full", "jpeg"):
-                color_range = "pc"
+        color = self._color_from_video_stream(video_stream)
         size_bytes = 0
         size_value = format_info.get("size")
         if size_value:
@@ -235,10 +226,13 @@ class MediaInfo:
             "duration_seconds": duration_seconds,
             "bit_rate": bit_rate,
             "size_bytes": size_bytes,
-            "color_primaries": color_primaries,
-            "color_transfer": color_transfer,
-            "color_space": color_space,
-            "color_range": color_range,
+            "color_primaries": color.get("color_primaries"),
+            "color_transfer": color.get("color_transfer"),
+            "color_space": color.get("color_space"),
+            "color_range": color.get("color_range"),
+            "mastering_display": color.get("mastering_display"),
+            "max_cll": color.get("max_cll"),
+            "max_fall": color.get("max_fall"),
         }
 
     def extract_audio_tracks(self, input_file: str) -> List[Dict[str, object]]:
@@ -285,6 +279,130 @@ class MediaInfo:
             if lang:
                 mapped[track_index] = lang
         return mapped
+
+    @staticmethod
+    def _norm_color_value(value: Optional[object]) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip().lower().replace("_", "-")
+        if not text or text in {"unknown", "unspecified", "none"}:
+            return None
+        aliases = {
+            "bt2020ncl": "bt2020-ncl",
+            "bt2020nc": "bt2020-ncl",
+            "bt2020-ncl": "bt2020-ncl",
+            "bt2020": "bt2020",
+            "smpte2084": "smpte2084",
+            "pq": "smpte2084",
+            "arib-std-b67": "arib-std-b67",
+            "hlg": "arib-std-b67",
+            "limited": "tv",
+            "mpeg": "tv",
+            "tv": "tv",
+            "full": "pc",
+            "jpeg": "pc",
+            "pc": "pc",
+        }
+        return aliases.get(text, text)
+
+    def _color_from_video_stream(self, video_stream: Dict) -> Dict[str, Optional[object]]:
+        color_range = self._norm_color_value(video_stream.get("color_range"))
+        mastering = None
+        max_cll = None
+        max_fall = None
+        for side in video_stream.get("side_data_list") or []:
+            kind = str(side.get("side_data_type") or "")
+            if "Mastering display" in kind:
+                parts = []
+                for key in (
+                    "red_x",
+                    "red_y",
+                    "green_x",
+                    "green_y",
+                    "blue_x",
+                    "blue_y",
+                    "white_x",
+                    "white_y",
+                    "min_luminance",
+                    "max_luminance",
+                ):
+                    value = side.get(key)
+                    if value is not None:
+                        parts.append(f"{key}={value}")
+                if parts:
+                    mastering = ",".join(parts)
+            elif "Content light level" in kind:
+                if side.get("max_content") is not None:
+                    max_cll = str(side.get("max_content"))
+                if side.get("max_average") is not None:
+                    max_fall = str(side.get("max_average"))
+        return {
+            "color_primaries": self._norm_color_value(video_stream.get("color_primaries")),
+            "color_transfer": self._norm_color_value(video_stream.get("color_transfer")),
+            "color_space": self._norm_color_value(video_stream.get("color_space")),
+            "color_range": color_range,
+            "mastering_display": mastering,
+            "max_cll": max_cll,
+            "max_fall": max_fall,
+        }
+
+    def extract_color_info(self, media_path: str) -> Dict[str, Optional[object]]:
+        data = self._run_ffprobe(media_path)
+        if not data:
+            return {}
+        video_stream = next(
+            (s for s in data.get("streams", []) if s.get("codec_type") == "video"),
+            {},
+        )
+        return self._color_from_video_stream(video_stream)
+
+    def compare_color_metadata(
+        self,
+        source_info: Dict[str, object],
+        output_file: str,
+    ) -> List[str]:
+        source_keys = (
+            "color_primaries",
+            "color_transfer",
+            "color_space",
+            "color_range",
+            "mastering_display",
+            "max_cll",
+            "max_fall",
+        )
+        if not any(source_info.get(key) for key in source_keys):
+            return []
+        output_color = self.extract_color_info(output_file)
+        if not output_color:
+            return ["成片无法读取色彩信息"]
+        labels = {
+            "color_primaries": "color_primaries",
+            "color_transfer": "color_transfer",
+            "color_space": "color_space",
+            "color_range": "color_range",
+        }
+        warnings: List[str] = []
+        for key, label in labels.items():
+            src = self._norm_color_value(source_info.get(key))
+            dst = self._norm_color_value(output_color.get(key))
+            if not src:
+                continue
+            if not dst:
+                warnings.append(f"{label} 丢失（源 {src}）")
+            elif src != dst:
+                warnings.append(f"{label} 不一致（源 {src} → 成片 {dst}）")
+        for key, label in (
+            ("mastering_display", "mastering display"),
+            ("max_cll", "MaxCLL"),
+            ("max_fall", "MaxFALL"),
+        ):
+            src = source_info.get(key)
+            dst = output_color.get(key)
+            if not src:
+                continue
+            if not dst:
+                warnings.append(f"{label} 丢失")
+        return warnings
 
     def _calculate_vmaf_subsample(self, frame_count: Optional[int]) -> int:
         if not frame_count or frame_count <= 0:
@@ -391,15 +509,20 @@ class MediaInfo:
         ET.indent(tree, space="  ")
         return ET.tostring(element, encoding="unicode")
 
-    def _build_nfo_xml(self, data: Dict, encoder: str) -> str:
-        root = ET.Element("movie")
-        root.append(self._build_fileinfo_element(data, encoder))
-        return self._serialize_element(root)
-
     def find_sidecar_nfo(self, media_path: str) -> Optional[Path]:
         path = Path(media_path)
         for suffix in (".nfo", ".NFO"):
             candidate = path.with_suffix(suffix)
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def find_directory_nfo(self, directory: str) -> Optional[Path]:
+        path = Path(directory)
+        if not path.is_dir():
+            return None
+        for suffix in (".nfo", ".NFO"):
+            candidate = path / f"{path.name}{suffix}"
             if candidate.is_file():
                 return candidate
         return None
@@ -449,6 +572,8 @@ class MediaInfo:
         output_file: str,
         encoder: str,
         input_file: Optional[str] = None,
+        nfo_path: Optional[str] = None,
+        source_nfo: Optional[str] = None,
     ) -> bool:
         if not Path(output_file).is_file():
             return False
@@ -456,21 +581,22 @@ class MediaInfo:
         if not data:
             print("错误: 无法获取媒体信息，未生成NFO")
             return False
-        nfo_path = Path(output_file).with_suffix(".nfo")
-        source_nfo = self.find_sidecar_nfo(input_file) if input_file else None
-        if source_nfo:
-            try:
-                xml_text, encoding = self._reuse_nfo_with_fileinfo(
-                    source_nfo,
-                    self._build_fileinfo_element(data, encoder),
-                )
-                nfo_path.write_text(xml_text, encoding=encoding)
-                print(f"已复用源NFO并更新fileinfo: {nfo_path}")
-                return True
-            except (OSError, UnicodeError, ValueError, ET.ParseError) as exc:
-                print(f"警告: 复用源NFO失败，改为生成新NFO: {exc}")
-        xml_text = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
-        xml_text += self._build_nfo_xml(data, encoder)
-        nfo_path.write_text(xml_text, encoding="utf-8")
-        print(f"已生成NFO: {nfo_path}")
-        return True
+        nfo_path = Path(nfo_path) if nfo_path else Path(output_file).with_suffix(".nfo")
+        source_nfo_path = Path(source_nfo) if source_nfo else None
+        if source_nfo_path is not None and not source_nfo_path.is_file():
+            source_nfo_path = None
+        if source_nfo_path is None and input_file:
+            source_nfo_path = self.find_sidecar_nfo(input_file)
+        if source_nfo_path is None:
+            return False
+        try:
+            xml_text, encoding = self._reuse_nfo_with_fileinfo(
+                source_nfo_path,
+                self._build_fileinfo_element(data, encoder),
+            )
+            nfo_path.write_text(xml_text, encoding=encoding)
+            print(f"已复用源NFO并更新fileinfo: {nfo_path}")
+            return True
+        except (OSError, UnicodeError, ValueError, ET.ParseError) as exc:
+            print(f"警告: 复用源NFO失败，未写入NFO: {exc}")
+            return False
