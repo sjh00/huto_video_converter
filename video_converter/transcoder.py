@@ -630,7 +630,7 @@ class NVEncTranscoder:
         gop_len: Optional[int],
     ) -> Dict[str, object]:
         if crf is None:
-            crf = 16 if self.keep_grain else 26
+            crf = 18 if self.keep_grain else 24
         cmd, cmd_print, extras = self._build_svt_cmd(
             input_file,
             output_file,

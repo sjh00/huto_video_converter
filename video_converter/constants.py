@@ -39,7 +39,7 @@ class Constants:
             "lowest_ssimu2": 80.0,
             "size_limit": 0.85 if keep_grain else 0.80,
             "low": 10 if keep_grain else 18,
-            "high": 26 if keep_grain else 30,
+            "high": 30 if keep_grain else 34,
         }
         if Constants.is_svt_encoder(encoder):
             cfg["low"], cfg["high"] = (18, 32) if keep_grain else (24, 38)

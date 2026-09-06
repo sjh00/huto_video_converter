@@ -2,6 +2,8 @@
 
 基于 NVEncC 的视频转码工具，将片源转为 AV1/HEVC + MKV，并复制音轨、字幕、章节与 HDR 元数据。默认用 NVIDIA 硬件编码；胶片颗粒片也可选 SVT-AV1 软件编码。目标是在可接受画质下缩小体积，而不是为了重建颗粒把文件变大。
 
+![](example.png)
+
 ## 功能特性
 
 - **硬件加速**：默认 NVEncC AV1（`preset=quality` + `tune=uhq` + `--parallel auto`）
@@ -99,7 +101,7 @@ uv run video_converter.py [输入...] [选项]
 |---|---|---|
 | 目标 VMAF / 最低 VMAF | 97.3 / 93.0 | 97.3 / 93.0 |
 | 目标 SSIMU2 / 最低 SSIMU2 | 87.1 / 80.0 | 87.1 / 80.0 |
-| NVENC 搜索范围 (QVBR) | 10–26 | 18–30 |
+| NVENC 搜索范围 (QVBR) | 10–30 | 18–34 |
 | SVT-AV1 搜索范围 (CRF) | 18–32 | 24–38 |
 
 先选「达标且更小」中压缩最多的；没有则选「可接受且更小」中更接近目标的。QVBR/CRF 越大通常体积越小。这些目标/最低分会写入 `convert_result.json` 的 `quality_search`。
