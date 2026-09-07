@@ -11,7 +11,7 @@
 - **输入**：蓝光目录 (BDMV)、电视剧目录、单文件/单目录；MKV、MP4、TS、M2TS 等
 - **蓝光**：识别播放列表与章节 (MPLS)，按体积最大的正片优先处理；正片转成功才处理花絮（花絮无需转码则复制到输出）；正片无需转码则整盘跳过、正片失败则整盘失败。默认过滤过小的 STREAM 片段（片头 logo、声明等），可用 `--min-bluray-size` 调整
 - **轨与元数据**：拷贝音轨、字幕、章节、HDR10 / Dolby Vision RPU（NVENC）；PGS 字幕在并行编码完成后由 FFmpeg 补入
-- **NFO**：仅当片源有同名 NFO 时才输出 NFO（复用影片信息并只替换 `fileinfo`）；没有则不生成。蓝光根目录内与目录同名的 NFO 给正片用，并保持文件名。复制跳过的视频时，同目录同名 NFO 一并复制
+- **NFO**：仅当片源有同名 NFO 时才输出 NFO（复用影片信息并只替换 `fileinfo`）；没有则不生成。蓝光根目录内与目录同名的 NFO 给正片用，并保持文件名。复制跳过的视频时，同目录同名 NFO 一并复制。可用 `--force-nfo` 强制生成：片源有 NFO 则照旧复用，没有则基于成片信息生成一个新的 NFO
 - **自动质量**：未指定 `-q` 时对中间约 20 秒试片二分搜索。达标且体积小于片源则转；只达最低门槛但仍能缩小则转；否则跳过
 - **启动检查**：开始压片前确认 NVEncC 9.33+、ffmpeg、ffprobe；`svt_av1` 还要求 ffmpeg 带 `libsvtav1`
 - **成片对账**：转码成功后对比源片与成片的色彩标签（primaries / transfer / matrix / range，有则再看 mastering / MaxCLL）；丢失只警告，不把整次标失败
@@ -63,6 +63,7 @@ uv run video_converter.py [输入...] [选项]
 | `-z`, `--keep-default-zh-audio` | 只复制默认音轨和国语音轨 |
 | `--keep-grain` / `--no-keep-grain` | 是否保颗粒与纹理（默认开）。NVENC 关闭 UHQ 时域滤波；SVT-AV1 使用 VQ 且关闭颗粒合成 |
 | `--min-bluray-size` | 蓝光 STREAM 过滤阈值（MB）。**小于**该体积的片段自动过滤，**等于**该体积的仍会处理。默认 `40`。设为 `0` 则不按体积过滤 |
+| `--force-nfo` | 强制生成 NFO 文件。默认仅当片源有同名 NFO 时复用并更新 `fileinfo`；开启后，若片源没有 NFO 则基于成片信息生成一个新的 NFO |
 
 ### 蓝光片源处理
 

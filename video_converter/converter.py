@@ -26,6 +26,7 @@ class VideoConverter:
         keep_default_zh_audio: bool = False,
         keep_grain: bool = True,
         min_bluray_size_mb: float = Constants.MIN_BLURAY_FILE_SIZE_MB,
+        force_nfo: bool = False,
     ):
         self.detector = BluRayDetector()
         self.transcoder = NVEncTranscoder(
@@ -48,6 +49,7 @@ class VideoConverter:
         self.keep_default_zh_audio = keep_default_zh_audio
         self.keep_grain = keep_grain
         self.min_bluray_size_mb = min_bluray_size_mb
+        self.force_nfo = force_nfo
 
     def _temp_dir(self) -> Path:
         temp_dir = Path(__file__).parent.parent / "temp"
@@ -104,7 +106,7 @@ class VideoConverter:
         if copied:
             self.copied_on_skip.append(input_file)
         if write_nfo and Path(output_file).is_file():
-            self.media_info.write_nfo(output_file, encoder, input_file)
+            self.media_info.write_nfo(output_file, encoder, input_file, force=self.force_nfo)
 
     def _record_success(self, input_file: str, stats: Optional[Dict[str, object]] = None) -> None:
         item: Dict[str, object] = {"path": input_file}
@@ -142,6 +144,10 @@ class VideoConverter:
         if src is None:
             src = self.media_info.find_sidecar_nfo(input_file)
         if src is None:
+            if self.force_nfo:
+                self.media_info.write_nfo(
+                    output_file, "", input_file, nfo_path=nfo_output_path, force=self.force_nfo
+                )
             return
         dest = (
             Path(nfo_output_path)
@@ -939,6 +945,7 @@ class VideoConverter:
                     input_file,
                     nfo_path=nfo_output_path,
                     source_nfo=source_nfo,
+                    force=self.force_nfo,
                 )
             quality = dict(result.get("quality") or {})
             quality["quality_value"] = qvbr

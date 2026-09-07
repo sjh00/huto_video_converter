@@ -113,6 +113,15 @@ def main():
             "等于该体积的片段仍会处理。设为 0 则不按体积跳过。"
         ),
     )
+    parser.add_argument(
+        "--force-nfo",
+        action="store_true",
+        default=False,
+        help=(
+            "强制生成 NFO 文件。默认仅当片源有同名 NFO 时复用并更新 fileinfo；"
+            "开启后，若片源没有 NFO 则基于成片信息生成一个新的 NFO。"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -166,6 +175,7 @@ def main():
         args.keep_default_zh_audio,
         args.keep_grain,
         args.min_bluray_size,
+        args.force_nfo,
     )
 
     GREEN = "\033[92m"

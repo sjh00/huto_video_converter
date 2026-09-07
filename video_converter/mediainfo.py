@@ -567,6 +567,32 @@ class MediaInfo:
         encoding = "utf-8-sig" if has_bom else "utf-8"
         return xml_text, encoding
 
+    def _build_generated_nfo_element(self, data: Dict, encoder: str, title: str) -> ET.Element:
+        movie = ET.Element("movie")
+        if title:
+            ET.SubElement(movie, "title").text = title
+        movie.append(self._build_fileinfo_element(data, encoder))
+        return movie
+
+    def _write_generated_nfo(
+        self,
+        data: Dict,
+        encoder: str,
+        title: str,
+        nfo_path: Path,
+    ) -> bool:
+        root = self._build_generated_nfo_element(data, encoder, title)
+        body = ET.tostring(root, encoding="unicode")
+        xml_text = '<?xml version="1.0" encoding="UTF-8"?>\n' + body
+        try:
+            nfo_path.parent.mkdir(parents=True, exist_ok=True)
+            nfo_path.write_text(xml_text, encoding="utf-8")
+            print(f"已生成NFO: {nfo_path}")
+            return True
+        except OSError as exc:
+            print(f"警告: 生成NFO失败: {exc}")
+            return False
+
     def write_nfo(
         self,
         output_file: str,
@@ -574,6 +600,7 @@ class MediaInfo:
         input_file: Optional[str] = None,
         nfo_path: Optional[str] = None,
         source_nfo: Optional[str] = None,
+        force: bool = False,
     ) -> bool:
         if not Path(output_file).is_file():
             return False
@@ -588,7 +615,11 @@ class MediaInfo:
         if source_nfo_path is None and input_file:
             source_nfo_path = self.find_sidecar_nfo(input_file)
         if source_nfo_path is None:
-            return False
+            if not force:
+                return False
+            return self._write_generated_nfo(
+                data, encoder, Path(output_file).stem, nfo_path
+            )
         try:
             xml_text, encoding = self._reuse_nfo_with_fileinfo(
                 source_nfo_path,
